@@ -12,6 +12,8 @@ class PowerManager {
     void offAll();
     bool isOn(const String& name);
 
+    void disableWiFiAndBT();
+
   private:
     struct SensorControl {
         uint8_t pin;

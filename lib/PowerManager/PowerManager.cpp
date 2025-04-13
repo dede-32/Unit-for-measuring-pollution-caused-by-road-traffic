@@ -1,4 +1,7 @@
 #include "PowerManager.h"
+#include <WiFi.h>
+#include <esp_wifi.h>
+#include <esp_bt.h>
 
 void PowerManager::addSensor(const String& name, uint8_t gpioPin, bool activeHigh) {
     SensorControl s;
@@ -37,4 +40,11 @@ void PowerManager::offAll() {
 bool PowerManager::isOn(const String& name) {
     auto it = sensors.find(name);
     return (it != sensors.end()) ? it->second.state : false;
+}
+
+void PowerManager::disableWiFiAndBT() {
+    WiFi.mode(WIFI_OFF);
+    esp_wifi_stop();
+    btStop();
+    esp_bt_controller_disable();
 }
