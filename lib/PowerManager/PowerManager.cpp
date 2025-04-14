@@ -8,11 +8,12 @@ void PowerManager::addSensor(const String& name, uint8_t gpioPin, bool activeHig
     s.pin = gpioPin;
     s.activeHigh = activeHigh;
     s.state = false;
-    pinMode(gpioPin, OUTPUT);
-    digitalWrite(gpioPin, activeHigh ? LOW : HIGH);  // začni vypnuto
+    pinMode(gpioPin, OUTPUT_OPEN_DRAIN);
+    digitalWrite(gpioPin, activeHigh ? LOW : HIGH);
 
     sensors[name] = s;
 }
+
 
 void PowerManager::on(const String& name) {
     auto it = sensors.find(name);

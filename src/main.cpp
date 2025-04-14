@@ -1,273 +1,213 @@
 #include <heltec_unofficial.h>
-#include <LoRaWAN_ESP32.h>
 #include "PowerManager.h"
-#include "SensirionI2cScd4x.h"
 #include <bsec2.h>
+#include <Preferences.h>
+#include "SensirionI2cScd4x.h"
 
+
+// ==== I2C piny (přizpůsob podle potřeby) ====
 #define SDA_PIN 18
 #define SCL_PIN 20
-#define MINIMUM_DELAY 300  // in seconds
 
-#define SAMPLE_RATE		BSEC_SAMPLE_RATE_ULP
-#define PANIC_LED   LED_BUILTIN
-#define ERROR_DUR   1000
-
+// ==== Globální proměnné ====
 PowerManager pm;
+Preferences prefs;
+Bsec2 bsec;
 SensirionI2cScd4x scd4x;
-Bsec2 envSensor;
-
-TwoWire I2CBus = TwoWire(0);
 
 
-// LoRaWANNode* node;
+struct SensorData {
+  float iaq = NAN;
+  uint8_t iaqAccuracy = 0;
+  float temperature = NAN;
+  float humidity = NAN;
+  float pressure = NAN;
+  float bsec_co2 = NAN;
+  float bvoc = NAN;
+
+  float scd41_co2 = NAN;
+  float scd41_temp = NAN;
+  float scd41_rh = NAN;
 
 
-void goToSleep(uint32_t desiredDelay = MINIMUM_DELAY);
 
-void checkBsecStatus(Bsec2 bsec);
+  bool updated = false;
+};
+
+SensorData sensorData;
+
+
 void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bsec);
-void errLeds(void);
+void checkBsecStatus(Bsec2 bsec);
+void readSCD41();
 
+// ==== Setup ====
 void setup() {
   Serial.begin(115200);
-  while(!Serial) delay(10);
-
+  while (!Serial) delay(10);
   pm.disableWiFiAndBT();
+  Wire.begin(SDA_PIN, SCL_PIN);
 
   // Register sensors and their power control pins
   pm.addSensor("SCD41", 5, false);
   pm.addSensor("SPS30", 7, false);
   pm.addSensor("BME688", 4, true); // Always on for AQI
   pm.addSensor("DMM4026", 6, false); 
-  pm.addSensor("EN", 19, true);
+  pm.addSensor("EN", 19, false);
 
-
-  // Initialize custom I2C
-  I2CBus.begin(SDA_PIN, SCL_PIN);
-
-  // Initialize SCD41
-  scd4x.begin(I2CBus, 0x62);
-
-  // Initialize BME688
-  pinMode(PANIC_LED, OUTPUT);
-  bsecSensor sensorList[] = {
-    BSEC_OUTPUT_IAQ,
-    BSEC_OUTPUT_RAW_TEMPERATURE,
-    BSEC_OUTPUT_RAW_PRESSURE,
-    BSEC_OUTPUT_RAW_HUMIDITY,
-    BSEC_OUTPUT_RAW_GAS,
-    BSEC_OUTPUT_STABILIZATION_STATUS,
-    BSEC_OUTPUT_RUN_IN_STATUS,
-    BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE,
-    BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY,
-    BSEC_OUTPUT_STATIC_IAQ,
-    BSEC_OUTPUT_CO2_EQUIVALENT,
-    BSEC_OUTPUT_BREATH_VOC_EQUIVALENT,
-    BSEC_OUTPUT_GAS_PERCENTAGE,
-    BSEC_OUTPUT_COMPENSATED_GAS
-};
-
-  if (!envSensor.begin(BME68X_I2C_ADDR_LOW, I2CBus))
-    {
-        checkBsecStatus(envSensor);
+  // ==== Načtení stavu BSEC ====
+  prefs.begin("bsec", true);
+  int stateLen = prefs.getBytesLength("iaqState");
+  if (stateLen > 0 && stateLen <= BSEC_MAX_STATE_BLOB_SIZE) {
+    uint8_t state[BSEC_MAX_STATE_BLOB_SIZE];
+    prefs.getBytes("iaqState", state, stateLen);
+    if (bsec.setState(state)) {
+      Serial.println("BSEC state loaded from flash");
+    } else {
+      Serial.println("Failed to apply BSEC state");
     }
-
-  if (SAMPLE_RATE == BSEC_SAMPLE_RATE_ULP)
-    {
-      envSensor.setTemperatureOffset(TEMP_OFFSET_ULP);
-    }
-    else if (SAMPLE_RATE == BSEC_SAMPLE_RATE_LP)
-    {
-      envSensor.setTemperatureOffset(TEMP_OFFSET_LP);
-    }
-  
-  if (!envSensor.updateSubscription(sensorList, ARRAY_LEN(sensorList), SAMPLE_RATE))
-    {
-        checkBsecStatus(envSensor);
-    }
-
-    envSensor.attachCallback(newDataCallback);
-
-  // Initialize LoRaWAN
-  // node = new LoRaWANNode();
-  // node->begin();
-}
-
-void loop() {
-  // ------------------------
-  // 1. SCD41 measurement
-  // ------------------------
-  pm.on("SCD41");
-  delay(100);  // power stabilization
-
-  scd4x.stopPeriodicMeasurement();
-  delay(500);  // doporučeno Sensirionem
-  uint16_t co2 = 0;
-  float temp = 0.0;
-  float rh = 0.0;
-  int16_t err_scd41 = scd4x.measureAndReadSingleShot(co2, temp, rh);
-  pm.off("SCD41");
-
-  // ------------------------
-  // 2. SPS30 measurement
-  // ------------------------
-  // pm.on("SPS30");
-  // delay(100);
-  // // TODO: Read particulate matter values
-  // pm.off("SPS30");
-
-  // ------------------------
-  // 3. BME688 measurement
-  // ------------------------
-  if (!envSensor.run())
-    {
-        checkBsecStatus(envSensor);
-    }
-
-  // ------------------------
-  // 4. DMM4026 measurement
-  // ------------------------
-  // pm.on("DMM4026");
-  // delay(100);
-  // // TODO:
-  // pm.off("DMM4026");
-
-  // ------------------------
-  // 5. Serial monitor
-  // ------------------------
-  Serial.println("------------------------------ Measurement Results ------------------------------");
-
-  if (err_scd41 == 0) {
-    Serial.printf("CO2: %u ppm | Temp: %.2f °C | RH: %.1f %%\n", co2, temp, rh);
   } else {
-    Serial.print("SCD41 measurement error: ");
-    Serial.println(err_scd41);
+    Serial.println("No BSEC state found in flash");
+  }
+  prefs.end();
+
+  // ==== Inicializace BME688 ====
+  if (!bsec.begin(BME68X_I2C_ADDR_LOW, Wire)) {
+    checkBsecStatus(bsec);
   }
 
+  // Initialize SCD41
+  scd4x.begin(Wire, 0x62);
 
-  // ------------------------
-  // 6. LoRaWAN data transmission
-  // ------------------------
-  // if (err_scd41 == 0) {
-  //   LoRaWANMessage msg;
-  //   msg.addUint16(co2);
-  //   msg.addFloat(temp);
-  //   msg.addFloat(rh);
-  //   node->send(msg);
-  // }
-  // TODO: Add other sensor values to the payload
+  bsec.setTemperatureOffset(TEMP_OFFSET_ULP);
 
-  // node->send(msg);
+  bsecSensor outputs[] = {
+    BSEC_OUTPUT_IAQ,
+    BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE,
+    BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY,
+    BSEC_OUTPUT_RAW_PRESSURE,
+    BSEC_OUTPUT_CO2_EQUIVALENT,
+    BSEC_OUTPUT_BREATH_VOC_EQUIVALENT,
+  };
 
-  // ------------------------
-  // 7. Light sleep
-  // ------------------------
-  // goToSleep();
-  delay(5000);
+  if (!bsec.updateSubscription(outputs, ARRAY_LEN(outputs), BSEC_SAMPLE_RATE_ULP)) {
+    checkBsecStatus(bsec);
+  }
+  bsec.attachCallback(newDataCallback);
+
+  Serial.println("Setup complete. Waiting for first data...");
+}
+
+// ==== Loop ====
+void loop() {
+    sensorData.updated = false;
   
+    while (!sensorData.updated) {
+      bsec.run();
+      delay(100);
+    }
+  
+    readSCD41();
+
+
+
+    Serial.println("----------------------BME688----------------------------");
+    Serial.printf("IAQ: %.2f (accuracy: %d)\n", sensorData.iaq, sensorData.iaqAccuracy);
+    Serial.printf("Temp: %.2f °C, Humidity: %.2f %%\n", sensorData.temperature, sensorData.humidity);
+    Serial.printf("Pressure: %.2f hPa\n", sensorData.pressure);
+    Serial.printf("CO₂eq: %.2f ppm, bVOC: %.2f ppm\n", sensorData.bsec_co2, sensorData.bvoc);
+    Serial.println("----------------------SCD41----------------------------");
+    Serial.printf("CO₂: %.2f ppm, Temp: %.2f °C, Humidity: %.2f %%\n", sensorData.scd41_co2, sensorData.scd41_temp, sensorData.scd41_rh);
+    Serial.println("--------------------------------------------------");
+  
+
+    const unsigned long sleepTimeMs = 300000UL - 10000UL;
+  
+    Serial.print("Going to light sleep for ");
+    Serial.print(sleepTimeMs / 1000);
+    Serial.println(" seconds...\n");
+    delay(100);
+
+    esp_sleep_enable_timer_wakeup(sleepTimeMs * 1000ULL);
+    esp_light_sleep_start();
+  }
+
+// ==== Callback z BSEC2 ====
+void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bsec) {
+    for (uint8_t i = 0; i < outputs.nOutputs; i++) {
+      const bsecData o = outputs.output[i];
+  
+      switch (o.sensor_id) {
+        case BSEC_OUTPUT_IAQ:
+          sensorData.iaq = o.signal;
+          sensorData.iaqAccuracy = o.accuracy;
+  
+          // Uložení stavu při dosažení plné kalibrace
+          static bool stateSaved = false;
+          if (!stateSaved && sensorData.iaqAccuracy == 3) {
+            uint8_t state[BSEC_MAX_STATE_BLOB_SIZE];
+            uint32_t stateLen = bsec.getState(state);
+  
+            prefs.begin("bsec", false);
+            prefs.putBytes("iaqState", state, stateLen);
+            prefs.end();
+  
+            Serial.println("BSEC state saved to flash");
+            stateSaved = true;
+          }
+          break;
+  
+        case BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE:
+          sensorData.temperature = o.signal;
+          break;
+        case BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY:
+          sensorData.humidity = o.signal;
+          break;
+        case BSEC_OUTPUT_RAW_PRESSURE:
+          sensorData.pressure = o.signal;
+          break;
+        case BSEC_OUTPUT_CO2_EQUIVALENT:
+          sensorData.bsec_co2 = o.signal;
+          break;
+        case BSEC_OUTPUT_BREATH_VOC_EQUIVALENT:
+          sensorData.bvoc = o.signal;
+          break;
+      }
+    }
+  
+    sensorData.updated = true;
+  }
+
+void readSCD41() {
+  uint16_t co2;
+  float temp, rh;
+
+  pm.on("SCD41");       // zapnutí napájení senzoru
+  delay(100);           // stabilizace napájení
+
+  int16_t err = scd4x.measureAndReadSingleShot(co2, temp, rh);
+  if (err) {
+    Serial.println("SCD41 measurement failed!");
+    pm.off("SCD41");
+    return;
+  }
+
+  // Uložení do struktury
+  sensorData.scd41_co2 = co2;
+  sensorData.scd41_temp = temp;
+  sensorData.scd41_rh = rh;
+
+  pm.off("SCD41");
 }
 
-void goToSleep(uint32_t desiredDelay) {
-  uint32_t delaySec = max(desiredDelay, (uint32_t)MINIMUM_DELAY);
-  Serial.printf("Going to light sleep for %u seconds...\n", delaySec);
-  delay(100);
-  esp_sleep_enable_timer_wakeup((uint64_t)delaySec * 1000000ULL);
-  esp_light_sleep_start();
-  Serial.println("Woke up from light sleep.");
-}
 
-void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bsec)
-{
-    if (!outputs.nOutputs)
-    {
-        return;
+  void checkBsecStatus(Bsec2 bsec) {
+    if (bsec.status < BSEC_OK) {
+      Serial.println("BSEC error: " + String(bsec.status));
+      while (true);
     }
-
-    Serial.println("BSEC outputs:\n\tTime stamp = " + String((int) (outputs.output[0].time_stamp / INT64_C(1000000))));
-    for (uint8_t i = 0; i < outputs.nOutputs; i++)
-    {
-        const bsecData output  = outputs.output[i];
-        switch (output.sensor_id)
-        {
-            case BSEC_OUTPUT_IAQ:
-                Serial.println("\tIAQ = " + String(output.signal));
-                Serial.println("\tIAQ accuracy = " + String((int) output.accuracy));
-                break;
-            case BSEC_OUTPUT_RAW_TEMPERATURE:
-                Serial.println("\tTemperature = " + String(output.signal));
-                break;
-            case BSEC_OUTPUT_RAW_PRESSURE:
-                Serial.println("\tPressure = " + String(output.signal));
-                break;
-            case BSEC_OUTPUT_RAW_HUMIDITY:
-                Serial.println("\tHumidity = " + String(output.signal));
-                break;
-            case BSEC_OUTPUT_RAW_GAS:
-                Serial.println("\tGas resistance = " + String(output.signal));
-                break;
-            case BSEC_OUTPUT_STABILIZATION_STATUS:
-                Serial.println("\tStabilization status = " + String(output.signal));
-                break;
-            case BSEC_OUTPUT_RUN_IN_STATUS:
-                Serial.println("\tRun in status = " + String(output.signal));
-                break;
-            case BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE:
-                Serial.println("\tCompensated temperature = " + String(output.signal));
-                break;
-            case BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_HUMIDITY:
-                Serial.println("\tCompensated humidity = " + String(output.signal));
-                break;
-            case BSEC_OUTPUT_STATIC_IAQ:
-                Serial.println("\tStatic IAQ = " + String(output.signal));
-                break;
-            case BSEC_OUTPUT_CO2_EQUIVALENT:
-                Serial.println("\tCO2 Equivalent = " + String(output.signal));
-                break;
-            case BSEC_OUTPUT_BREATH_VOC_EQUIVALENT:
-                Serial.println("\tbVOC equivalent = " + String(output.signal));
-                break;
-            case BSEC_OUTPUT_GAS_PERCENTAGE:
-                Serial.println("\tGas percentage = " + String(output.signal));
-                break;
-            case BSEC_OUTPUT_COMPENSATED_GAS:
-                Serial.println("\tCompensated gas = " + String(output.signal));
-                break;
-            default:
-                break;
-        }
+    if (bsec.sensor.status < BME68X_OK) {
+      Serial.println("BME68X error: " + String(bsec.sensor.status));
+      while (true);
     }
-}
-
-void checkBsecStatus(Bsec2 bsec)
-{
-    if (bsec.status < BSEC_OK)
-    {
-        Serial.println("BSEC error code : " + String(bsec.status));
-        errLeds(); /* Halt in case of failure */
-    }
-    else if (bsec.status > BSEC_OK)
-    {
-        Serial.println("BSEC warning code : " + String(bsec.status));
-    }
-
-    if (bsec.sensor.status < BME68X_OK)
-    {
-        Serial.println("BME68X error code : " + String(bsec.sensor.status));
-        errLeds(); /* Halt in case of failure */
-    }
-    else if (bsec.sensor.status > BME68X_OK)
-    {
-        Serial.println("BME68X warning code : " + String(bsec.sensor.status));
-    }
-}
-
-void errLeds(void)
-{
-    while(1)
-    {
-        digitalWrite(PANIC_LED, HIGH);
-        delay(ERROR_DUR);
-        digitalWrite(PANIC_LED, LOW);
-        delay(ERROR_DUR);
-    }
-}
+  }
