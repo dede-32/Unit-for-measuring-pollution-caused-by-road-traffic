@@ -22,10 +22,10 @@ struct SensorData {
   float temperature = NAN;
   float humidity = NAN;
   float pressure = NAN;
-  float bsec_co2 = NAN;
+  uint16_t bsec_co2 = 0;
   float bvoc = NAN;
 
-  float scd41_co2 = NAN;
+  uint16_t scd41_co2 = 0;
   float scd41_temp = NAN;
   float scd41_rh = NAN;
 
@@ -50,7 +50,7 @@ void setup() {
   Wire.begin(SDA_PIN, SCL_PIN);
 
   // Register sensors and their power control pins
-  pm.addSensor("SCD41", 5, false);
+  pm.addSensor("SCD41", 5, true); // Always on for automatic self-calibration (ASC)
   pm.addSensor("SPS30", 7, false);
   pm.addSensor("BME688", 4, true); // Always on for AQI
   pm.addSensor("DMM4026", 6, false); 
@@ -94,7 +94,8 @@ void setup() {
   }
   bsec.attachCallback(newDataCallback);
 
-
+  // ==== Inicializace SCD41 ====
+  scd4x.begin(Wire, 0x62);
 
 
   Serial.println("Setup complete. Waiting for first data...");
@@ -117,9 +118,9 @@ void loop() {
     Serial.printf("IAQ: %.2f (accuracy: %d)\n", sensorData.iaq, sensorData.iaqAccuracy);
     Serial.printf("Temp: %.2f °C, Humidity: %.2f %%\n", sensorData.temperature, sensorData.humidity);
     Serial.printf("Pressure: %.2f hPa\n", sensorData.pressure);
-    Serial.printf("CO₂eq: %.2f ppm, bVOC: %.2f ppm\n", sensorData.bsec_co2, sensorData.bvoc);
+    Serial.printf("CO₂eq: %.2u ppm, bVOC: %.2f ppm\n", sensorData.bsec_co2, sensorData.bvoc);
     Serial.println("----------------------SCD41----------------------------");
-    Serial.printf("CO₂: %.2f ppm, Temp: %.2f °C, Humidity: %.2f %%\n", sensorData.scd41_co2, sensorData.scd41_temp, sensorData.scd41_rh);
+    Serial.printf("CO₂: %.2u ppm, Temp: %.2f °C, Humidity: %.2f %%\n", sensorData.scd41_co2, sensorData.scd41_temp, sensorData.scd41_rh);
     Serial.println("--------------------------------------------------");
   
 
@@ -182,97 +183,74 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
   }
 
   void readSCD41() {
-    uint16_t co2;
+    uint16_t co2, error;
     float temp, rh;
     char errorMessage[64];
   
-    pm.on("SCD41");
-    delay(100);  // stabilizace napájení
-  
-    scd4x.begin(Wire, 0x62);
-    scd4x.setTemperatureOffset(2.95);
-    scd4x.setSensorAltitude(235);
-    scd4x.startPeriodicMeasurement();
-  
-    delay(5000);  // čas na první měření
-  
-    bool dataReady = false;
-    int16_t error = scd4x.getDataReadyStatus(dataReady);
+    // Wake up sensor from low-power mode
+    error = scd4x.wakeUp();
     if (error != 0) {
-      Serial.println("Error: getDataReadyStatus()");
-      pm.off("SCD41");
-      return;
-    }
-  
-    // Čekací smyčka na validní data
-    while (!dataReady) {
-      delay(100);
-      error = scd4x.getDataReadyStatus(dataReady);
-      if (error != 0) {
-        Serial.println("Error: getDataReadyStatus() inside loop");
-        pm.off("SCD41");
+        Serial.print("SCD41 wakeUp() failed: ");
+        errorToString(error, errorMessage, sizeof(errorMessage));
+        Serial.println(errorMessage);
         return;
-      }
     }
-  
-    error = scd4x.readMeasurement(co2, temp, rh);
+
+    error = scd4x.setAmbientPressureRaw((uint16_t)(sensorData.pressure + 0.5f));
     if (error != 0) {
-      Serial.print("Error trying to execute readMeasurement(): ");
-      errorToString(error, errorMessage, sizeof errorMessage);
+      Serial.print("SCD41 setAmbientPressureRaw() failed: ");
+      errorToString(error, errorMessage, sizeof(errorMessage));
       Serial.println(errorMessage);
       pm.off("SCD41");
       return;
     }
-  
-    // Uložení hodnot
+
+    // Ignoruj první měření po zapnutí napájení
+    error = scd4x.measureSingleShot();
+    if (error != 0) {
+      Serial.print("SCD41 measureSingleShot() failed: ");
+      errorToString(error, errorMessage, sizeof(errorMessage));
+      Serial.println(errorMessage);
+      pm.off("SCD41");
+      return;
+    }
+
+    // Hlavní měření a čtení dat
+    error = scd4x.measureAndReadSingleShot(co2, temp, rh);
+    if (error != 0) {
+      Serial.print("SCD41 measureAndReadSingleShot() failed: ");
+      errorToString(error, errorMessage, sizeof(errorMessage));
+      Serial.println(errorMessage);
+      pm.off("SCD41");
+      return;
+    }
+
+    // Power down sensor
+    error = scd4x.powerDown();
+    if (error != 0) {
+        Serial.print("SCD41 powerDown() failed: ");
+        errorToString(error, errorMessage, sizeof(errorMessage));
+        Serial.println(errorMessage);
+    }
+    
+    // Uložení do struktury
     sensorData.scd41_co2 = co2;
     sensorData.scd41_temp = temp;
     sensorData.scd41_rh = rh;
-  
-    scd4x.stopPeriodicMeasurement();
-    pm.off("SCD41");
-
-//   // Ignoruj první měření po zapnutí napájení
-//   error = scd4x.measureSingleShot();
-//   if (error != 0) {
-//     Serial.print("SCD41 measureSingleShot() failed: ");
-//     errorToString(error, errorMessage, sizeof(errorMessage));
-//     Serial.println(errorMessage);
-//     pm.off("SCD41");
-//     return;
-//   }
-  
-//   // Hlavní měření a čtení dat
-//   error = scd4x.measureAndReadSingleShot(co2, temp, rh);
-//   if (error != 0) {
-//     Serial.print("SCD41 measureAndReadSingleShot() failed: ");
-//     errorToString(error, errorMessage, sizeof(errorMessage));
-//     Serial.println(errorMessage);
-//     pm.off("SCD41");
-//     return;
-//   }
-  
-  
-//   // Uložení do struktury
-//   sensorData.scd41_co2 = co2;
-//   sensorData.scd41_temp = temp;
-//   sensorData.scd41_rh = rh;
-
-//   pm.off("SCD41");
 }
 
-bool waitForSCD41Data(uint16_t timeout_ms) {
-    uint32_t start = millis();
-    bool ready = false;
+// bool waitForSCD41Data(uint16_t timeout_ms) {
+//     uint32_t start = millis();
+//     bool ready = false;
   
-    while ((millis() - start) < timeout_ms) {
-      scd4x.getDataReadyStatus(ready);
-      if (ready) return true;
-      delay(100);
-    }
+//     while ((millis() - start) < timeout_ms) {
+//       scd4x.getDataReadyStatus(ready);
+//       if (ready) return true;
+//       delay(100);
+//     }
   
-    return false;
-  }
+//     return false;
+//   }
 
 
   void checkBsecStatus(Bsec2 bsec) {

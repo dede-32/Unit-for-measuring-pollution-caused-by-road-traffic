@@ -1,0 +1,57 @@
+#include <heltec_unofficial.h>
+#include "PowerManager.h"
+#include <SensirionI2cScd4x.h>
+
+
+// Konstanty
+#define SDA_PIN 18
+#define SCL_PIN 20
+
+PowerManager pm;
+SensirionI2cScd4x scd4x;
+
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial) delay(10);
+
+  uint16_t err;
+
+  pm.disableWiFiAndBT();
+  Wire.begin(SDA_PIN, SCL_PIN);
+
+  pm.addSensor("SCD41", 5, true);
+
+  delay(100);  // Stabilizace napájení
+
+  scd4x.begin(Wire, 0x62);
+
+  Serial.println("=== Factory reset přes Sensirion knihovnu ===");
+  err = scd4x.stopPeriodicMeasurement();
+  if (err) {
+    Serial.printf("Chyba stopPeriodicMeasurement(): %u\n", err);
+    return;
+  }
+  err = scd4x.performFactoryReset();  // blokuje až 1200 ms :contentReference[oaicite:0]{index=0}
+  if (err) {
+    Serial.printf("Chyba performFactoryReset(): %u\n", err);
+    return;
+  }
+  delay(1200);
+  err = scd4x.reinit();
+  if (err) {
+    Serial.printf("Chyba reinit(): %u\n", err);
+    return;
+  }
+  err = scd4x.startPeriodicMeasurement();
+  if (err) {
+    Serial.printf("Chyba startPeriodicMeasurement(): %u\n", err);
+    return;
+  }
+  Serial.println("Tovární nastavení dokončeno (knihovna).");
+
+}
+
+  void loop() {
+    // tady můžeš číst data nebo dál měřit
+  }
