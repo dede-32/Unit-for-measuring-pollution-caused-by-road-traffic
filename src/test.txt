@@ -1,116 +1,294 @@
 #include <heltec_unofficial.h>
 #include "PowerManager.h"
 #include <driver/i2s.h>
-
-#define SAMPLE_RATE     48000
-#define SAMPLE_BITS     32
-#define I2S_PORT        I2S_NUM_0
-#define I2S_MIC_CHANNEL I2S_CHANNEL_FMT_ONLY_LEFT
-#define MIC_VREF        0.0501f    // referenční hodnota RMS pro 94 dB SPL (nastavíš podle kalibrace)
+#include "sos-iir-filter.h"
 
 PowerManager pm;
 
-// Kompenzační filtr (4. řád)
-float eq_B[] = {1.3944, -2.3296, 1.7232, -2.0349, 1.2470};
-float eq_A[] = {1.0000, -0.7357, -0.6994, -0.3940, 0.8291};
 
-// A-weighting filtr (2. řád)
-float aweight_B[] = {0.1699, -0.3399, 0.1699};
-float aweight_A[] = {1.0000, -1.7600, 0.8026};
+#define LEQ_PERIOD        5           // second(s)
+#define WEIGHTING         C_weighting // Also avaliable: 'C_weighting' or 'None' (Z_weighting)
+#define LEQ_UNITS         "LCeq"      // customize based on above weighting used
+#define DB_UNITS          "dBC"       // customize based on above weighting used
 
-// Filtrační paměti
-float eq_x[5] = {}, eq_y[5] = {};
-float aw_x[3] = {}, aw_y[3] = {};
+// NOTE: Some microphones require at least DC-Blocker filter
+#define MIC_EQUALIZER     DMM4026    // See below for defined IIR filters or set to 'None' to disable
+#define MIC_OFFSET_DB     3.0103      // Default offset (sine-wave RMS vs. dBFS). Modify this value for linear calibration
 
-float iir_filter(float input, float* x, float* y, float* b, float* a, int order) {
-  for (int i = order; i > 0; i--) {
-    x[i] = x[i-1];
-    y[i] = y[i-1];
-  }
-  x[0] = input;
-  y[0] = b[0]*x[0];
-  for (int i = 1; i <= order; i++) {
-    y[0] += b[i]*x[i] - a[i]*y[i];
-  }
-  return y[0];
-}
+// Customize these values from microphone datasheet
+#define MIC_SENSITIVITY   -26         // dBFS value expected at MIC_REF_DB (Sensitivity value from datasheet)
+#define MIC_REF_DB        94.0        // Value at which point sensitivity is specified in datasheet (dB)
+#define MIC_OVERLOAD_DB   123.0       // dB - Acoustic overload point
+#define MIC_NOISE_DB      30          // dB - Noise floor
+#define MIC_BITS          24          // valid number of bits in I2S data
+#define MIC_CONVERT(s)    (s >> (SAMPLE_BITS - MIC_BITS))
+#define MIC_TIMING_SHIFT  0           // Set to one to fix MSB timing for some microphones, i.e. SPH0645LM4H-x
 
-void setupI2S() {
-  i2s_config_t config = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_RX),
-    .sample_rate = SAMPLE_RATE,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_32BIT,
-    .channel_format = I2S_MIC_CHANNEL,
-    .communication_format = I2S_COMM_FORMAT_STAND_MSB,
-    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 8,
-    .dma_buf_len = 1024,
-    .use_apll = false,
-    .tx_desc_auto_clear = false,
-    .fixed_mclk = 0
+// Calculate reference amplitude value at compile time
+const double MIC_REF_AMPL = pow(10, double(MIC_SENSITIVITY)/20) * ((1<<(MIC_BITS-1))-1);
+
+#define I2S_WS            17 
+#define I2S_SCK           34 
+#define I2S_SD            21 
+
+// I2S peripheral to use (0 or 1)
+#define I2S_PORT          I2S_NUM_0
+
+//
+// IIR Filters
+//
+
+// DC-Blocker filter - removes DC component from I2S data
+// See: https://www.dsprelated.com/freebooks/filters/DC_Blocker.html
+// a1 = -0.9992 should heavily attenuate frequencies below 10Hz
+SOS_Coefficients dc_blocker_sos[] = {
+  { -1.0f, 0.0f, 0.9992f, 0.0f }
+};
+
+SOS_IIR_Filter DC_BLOCKER(1.0f, dc_blocker_sos);
+
+
+
+// B = [1.39440333702844,         -2.32964845101583,          1.72317570137434,         -2.03491031951686,          1.24702178587164];
+// A = [1,        -0.735692695383726,        -0.699423914533476,        -0.393971049000193,         0.829126639391103];
+SOS_Coefficients dmm4026_sos[] = {
+  { +0.32926554828887622f, +0.89431156105707899f, -1.2642872936921958f, -0.82913278312506555f },
+  { -1.9999790277764218f, +0.99999259103480387f, +1.9999799890759211f, -0.99999259016880238f }
+};
+
+SOS_IIR_Filter DMM4026(1.3944033370284401f, dmm4026_sos);
+
+
+//
+// Weighting filters
+//
+
+//
+// A-weighting IIR Filter, Fs = 48KHz 
+// (By Dr. Matt L., Source: https://dsp.stackexchange.com/a/36122)
+// B = [0.169994948147430, 0.280415310498794, -1.120574766348363, 0.131562559965936, 0.974153561246036, -0.282740857326553, -0.152810756202003]
+// A = [1.0, -2.12979364760736134, 0.42996125885751674, 1.62132698199721426, -0.96669962900852902, 0.00121015844426781, 0.04400300696788968]
+SOS_Coefficients a_weighting_sos[] = {
+  { -2.00026996133106f, +1.00027056142719f, -1.060868438509278f, -0.163987445885926f },
+  { +4.35912384203144f, +3.09120265783884f, +1.208419926363593f, -0.273166998428332f },
+  { -0.70930303489759f, -0.29071868393580f, +1.982242159753048f, -0.982298594928989f }
+};
+
+SOS_IIR_Filter A_weighting(0.169994948147430f, a_weighting_sos);
+
+// C-weighting IIR Filter, Fs = 48KHz 
+// Designed by invfreqz curve-fitting, see respective .m file
+// B = [-0.49164716933714026, 0.14844753846498662, 0.74117815661529129, -0.03281878334039314, -0.29709276192593875, -0.06442545322197900, -0.00364152725482682]
+// A = [1.0, -1.0325358998928318, -0.9524000181023488, 0.8936404694728326   0.2256286147169398  -0.1499917107550188, 0.0156718181681081]
+SOS_Coefficients c_weighting_sos[] = {
+  { +1.4604385758204708f, +0.5275070373815286f, +1.9946144559930252f, -0.9946217070140883f },
+  { +0.2376222404939509f, +0.0140411206016894f, -1.3396585608422749f, -0.4421457807694559f },
+  { -2.0000000000000000f, +1.0000000000000000f, +0.3775800047420818f, -0.0356365756680430f }
+};
+
+SOS_IIR_Filter C_weighting(0.169994948147430f, a_weighting_sos);
+
+//
+// Sampling
+//
+#define SAMPLE_RATE       48000 // Hz, fixed to design of IIR filters
+#define SAMPLE_BITS       32    // bits
+#define SAMPLE_T          int32_t 
+#define SAMPLES_SHORT     (SAMPLE_RATE / 8) // ~125ms
+#define SAMPLES_LEQ       (SAMPLE_RATE * LEQ_PERIOD)
+#define DMA_BANK_SIZE     (SAMPLES_SHORT / 16)
+#define DMA_BANKS         32
+
+// Data we push to 'samples_queue'
+struct sum_queue_t {
+  // Sum of squares of mic samples, after Equalizer filter
+  float sum_sqr_SPL;
+  // Sum of squares of weighted mic samples
+  float sum_sqr_weighted;
+  // Debug only, FreeRTOS ticks we spent processing the I2S data
+  uint32_t proc_ticks;
+};
+QueueHandle_t samples_queue;
+
+// Static buffer for block of samples
+float samples[SAMPLES_SHORT] __attribute__((aligned(4)));
+
+//
+// I2S Microphone sampling setup 
+//
+void mic_i2s_init() {
+  // Setup I2S to sample mono channel for SAMPLE_RATE * SAMPLE_BITS
+  // NOTE: Recent update to Arduino_esp32 (1.0.2 -> 1.0.3)
+  //       seems to have swapped ONLY_LEFT and ONLY_RIGHT channels
+  const i2s_config_t i2s_config = {
+    mode: i2s_mode_t(I2S_MODE_MASTER | I2S_MODE_RX),
+    sample_rate: SAMPLE_RATE,
+    bits_per_sample: i2s_bits_per_sample_t(SAMPLE_BITS),
+    channel_format: I2S_CHANNEL_FMT_ONLY_LEFT,
+    // use the new non-deprecated constants:
+    communication_format: i2s_comm_format_t(I2S_COMM_FORMAT_STAND_I2S | I2S_COMM_FORMAT_STAND_MSB),
+    intr_alloc_flags: ESP_INTR_FLAG_LEVEL1,
+    dma_buf_count: DMA_BANKS,
+    dma_buf_len: DMA_BANK_SIZE,
+    use_apll: true,
+    tx_desc_auto_clear: false,
+    fixed_mclk: 0
+  };
+  // I2S pin mapping
+  const i2s_pin_config_t pin_config = {
+    bck_io_num:   I2S_SCK,  
+    ws_io_num:    I2S_WS,    
+    data_out_num: -1, // not used
+    data_in_num:  I2S_SD   
   };
 
-  i2s_pin_config_t pin_config = {
-    .bck_io_num = 34,
-    .ws_io_num = 17,
-    .data_out_num = I2S_PIN_NO_CHANGE,
-    .data_in_num = 21  // přizpůsob si podle zapojení
-  };
+  i2s_driver_install(I2S_PORT, &i2s_config, 0, NULL);
 
-  i2s_driver_install(I2S_PORT, &config, 0, NULL);
+  #if (MIC_TIMING_SHIFT > 0) 
+    // Undocumented (?!) manipulation of I2S peripheral registers
+    // to fix MSB timing issues with some I2S microphones
+    REG_SET_BIT(I2S_TIMING_REG(I2S_PORT), BIT(9));   
+    REG_SET_BIT(I2S_CONF_REG(I2S_PORT), I2S_RX_MSB_SHIFT);  
+  #endif
+  
   i2s_set_pin(I2S_PORT, &pin_config);
 }
+  //
+// I2S Reader Task
+//
+// Rationale for separate task reading I2S is that IIR filter
+// processing cam be scheduled to different core on the ESP32
+// while main task can do something else, like update the 
+// display in the example
+//
+// As this is intended to run as separate hihg-priority task, 
+// we only do the minimum required work with the I2S data
+// until it is 'compressed' into sum of squares 
+//
+// FreeRTOS priority and stack size (in 32-bit words) 
+#define I2S_TASK_PRI   4
+#define I2S_TASK_STACK 2048
+//
+void mic_i2s_reader_task(void* parameter) {
+  mic_i2s_init();
 
+  // Discard first block, microphone may have startup time (i.e. INMP441 up to 83ms)
+  size_t bytes_read = 0;
+  i2s_read(I2S_PORT, &samples, SAMPLES_SHORT * sizeof(int32_t), &bytes_read, portMAX_DELAY);
+
+  while (true) {
+    // Block and wait for microphone values from I2S
+    //
+    // Data is moved from DMA buffers to our 'samples' buffer by the driver ISR
+    // and when there is requested ammount of data, task is unblocked
+    //
+    // Note: i2s_read does not care it is writing in float[] buffer, it will write
+    //       integer values to the given address, as received from the hardware peripheral. 
+    i2s_read(I2S_PORT, &samples, SAMPLES_SHORT * sizeof(SAMPLE_T), &bytes_read, portMAX_DELAY);
+
+    TickType_t start_tick = xTaskGetTickCount();
+    
+    // Convert (including shifting) integer microphone values to floats, 
+    // using the same buffer (assumed sample size is same as size of float), 
+    // to save a bit of memory
+    SAMPLE_T* int_samples = reinterpret_cast<SAMPLE_T*>(samples);
+
+    for (int i = 0; i < SAMPLES_SHORT; i++) {
+      samples[i] = MIC_CONVERT(int_samples[i]);
+    }
+
+    sum_queue_t q;
+    DC_BLOCKER.filter(samples, samples, SAMPLES_SHORT);
+    // Apply equalization and calculate Z-weighted sum of squares, 
+    // writes filtered samples back to the same buffer.
+    q.sum_sqr_SPL = MIC_EQUALIZER.filter(samples, samples, SAMPLES_SHORT);
+
+    // Apply weighting and calucate weigthed sum of squares
+    q.sum_sqr_weighted = WEIGHTING.filter(samples, samples, SAMPLES_SHORT);
+
+    // Debug only. Ticks we spent filtering and summing block of I2S data
+    q.proc_ticks = xTaskGetTickCount() - start_tick;
+
+    // Send the sums to FreeRTOS queue where main task will pick them up
+    // and further calcualte decibel values (division, logarithms, etc...)
+    xQueueSend(samples_queue, &q, portMAX_DELAY);
+  }
+}
+
+//
+// Setup and main loop 
+//
+// Note: Use doubles, not floats, here unless you want to pin
+//       the task to whichever core it happens to run on at the moment
+// 
 void setup() {
-  Serial.begin(115200);
-  setupI2S();
 
-  // Register sensors and their power control pins
-  pm.addSensor("SCD41", 5, false);
-  pm.addSensor("SPS30", 7, false);
-  pm.addSensor("BME688", 4, true); // Always on for AQI
-  pm.addSensor("DMM4026", 6, true); 
-  pm.addSensor("EN", 19, false);
+  // If needed, now you can actually lower the CPU frquency,
+  // i.e. if you want to (slightly) reduce ESP32 power consumption 
+  setCpuFrequencyMhz(80); // It should run as low as 80MHz
+  
+  Serial.begin(115200);
+  delay(1000); // Safety
+
+    // Register sensors and their power control pins
+    pm.addSensor("SCD41", 5, false);
+    pm.addSensor("SPS30", 7, false);
+    pm.addSensor("BME688", 4, false); // Always on for AQI
+    pm.addSensor("DMM4026", 6, true); 
+    pm.addSensor("EN", 19, false);
+
+
+  // Create FreeRTOS queue
+  samples_queue = xQueueCreate(8, sizeof(sum_queue_t));
+  
+  // Create the I2S reader FreeRTOS task
+  // NOTE: Current version of ESP-IDF will pin the task 
+  //       automatically to the first core it happens to run on
+  //       (due to using the hardware FPU instructions).
+  //       For manual control see: xTaskCreatePinnedToCore
+  xTaskCreate(mic_i2s_reader_task, "Mic I2S Reader", I2S_TASK_STACK, NULL, I2S_TASK_PRI, NULL);
+
+  sum_queue_t q;
+  uint32_t Leq_samples = 0;
+  double Leq_sum_sqr = 0;
+  double Leq_dB = 0;
+
+  // Read sum of samaples, calculated by 'i2s_reader_task'
+  while (xQueueReceive(samples_queue, &q, portMAX_DELAY)) {
+
+    // Calculate dB values relative to MIC_REF_AMPL and adjust for microphone reference
+    double short_RMS = sqrt(double(q.sum_sqr_SPL) / SAMPLES_SHORT);
+    double short_SPL_dB = MIC_OFFSET_DB + MIC_REF_DB + 20 * log10(short_RMS / MIC_REF_AMPL);
+
+    // In case of acoustic overload or below noise floor measurement, report infinty Leq value
+    if (short_SPL_dB > MIC_OVERLOAD_DB) {
+      Leq_sum_sqr = INFINITY;
+    } else if (isnan(short_SPL_dB) || (short_SPL_dB < MIC_NOISE_DB)) {
+      Leq_sum_sqr = -INFINITY;
+    }
+
+    // Accumulate Leq sum
+    Leq_sum_sqr += q.sum_sqr_weighted;
+    Leq_samples += SAMPLES_SHORT;
+
+    // When we gather enough samples, calculate new Leq value
+    if (Leq_samples >= SAMPLE_RATE * LEQ_PERIOD) {
+      double Leq_RMS = sqrt(Leq_sum_sqr / Leq_samples);
+      Leq_dB = MIC_OFFSET_DB + MIC_REF_DB + 20 * log10(Leq_RMS / MIC_REF_AMPL);
+      Leq_sum_sqr = 0;
+      Leq_samples = 0;
+      
+      // Serial output, customize (or remove) as needed
+      Serial.printf("%.1f\n", Leq_dB);
+
+      // Debug only
+      //Serial.printf("%u processing ticks\n", q.proc_ticks);
+    }
+
+    
+  }
 }
 
 void loop() {
-  // pm.on("DMM4026");
-  // delay(100);  // stabilizace napájení
-
-  // Nulování filtrační paměti
-  memset(eq_x, 0, sizeof(eq_x));
-  memset(eq_y, 0, sizeof(eq_y));
-  memset(aw_x, 0, sizeof(aw_x));
-  memset(aw_y, 0, sizeof(aw_y));
-
-
-  const int durationSec = 5;
-  const int totalSamples = SAMPLE_RATE * durationSec;
-  size_t bytesRead;
-  int32_t sample = 0;
-  float sumSquares = 0;
-
-  for (int i = 0; i < totalSamples; i++) {
-    i2s_read(I2S_PORT, &sample, sizeof(sample), &bytesRead, portMAX_DELAY);
-    float s = sample / 2147483648.0f;  // normalizace 32bit signed int na -1.0 až +1.0
-
-    // Kompenzační IIR filtr
-    float eq_out = iir_filter(s, eq_x, eq_y, eq_B, eq_A, 4);
-
-    // A-weighting filtr
-    float aw_out = iir_filter(eq_out, aw_x, aw_y, aweight_B, aweight_A, 2);
-
-    sumSquares += aw_out * aw_out;
-  }
-
-  float rms = sqrt(sumSquares / totalSamples);
-  float dB = 20.0 * log10(rms / MIC_VREF);
-
-  Serial.print("SPL: ");
-  Serial.print(dB, 1);
-  Serial.println(" dB(A)");
-
-  // pm.off("DMM4026");
-
-  // delay(5 * 60 * 1000);  // spánek 5 minut
+  // Nothing here..
 }

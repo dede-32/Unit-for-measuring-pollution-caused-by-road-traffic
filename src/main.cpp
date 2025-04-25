@@ -3,6 +3,7 @@
 #include <bsec2.h>
 #include <Preferences.h>
 #include "SensirionI2cScd4x.h"
+#include "SoundMeter.h"
 
 
 // ==== I2C piny (přizpůsob podle potřeby) ====
@@ -14,6 +15,7 @@ PowerManager pm;
 Preferences prefs;
 Bsec2 bsec;
 SensirionI2cScd4x scd4x;
+SoundLevelMeter dmm4026;
 
 
 struct SensorData {
@@ -29,7 +31,7 @@ struct SensorData {
   float scd41_temp = NAN;
   float scd41_rh = NAN;
 
-
+  float dBC = NAN;
 
   bool updated = false;
 };
@@ -40,7 +42,6 @@ SensorData sensorData;
 void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bsec);
 void checkBsecStatus(Bsec2 bsec);
 void readSCD41();
-bool waitForSCD41Data(uint16_t timeout_ms);
 
 // ==== Setup ====
 void setup() {
@@ -97,6 +98,11 @@ void setup() {
   // ==== Inicializace SCD41 ====
   scd4x.begin(Wire, 0x62);
 
+  // ==== Inicializace DMM4026 ====
+  pm.on("DMM4026");
+  delay(100);
+  dmm4026.begin();
+  pm.off("DMM4026");
 
   Serial.println("Setup complete. Waiting for first data...");
 }
@@ -112,6 +118,11 @@ void loop() {
   
     readSCD41();
 
+    pm.on("DMM4026");
+    delay(100);
+    sensorData.dBC = dmm4026.measureLeq(5);
+
+    pm.off("DMM4026");
 
 
     Serial.println("----------------------BME688----------------------------");
@@ -121,6 +132,8 @@ void loop() {
     Serial.printf("CO₂eq: %.2u ppm, bVOC: %.2f ppm\n", sensorData.bsec_co2, sensorData.bvoc);
     Serial.println("----------------------SCD41----------------------------");
     Serial.printf("CO₂: %.2u ppm, Temp: %.2f °C, Humidity: %.2f %%\n", sensorData.scd41_co2, sensorData.scd41_temp, sensorData.scd41_rh);
+    Serial.println("----------------------DMM4026----------------------------");
+    Serial.printf("Noise: %.2f dB(C)\n", sensorData.dBC);
     Serial.println("--------------------------------------------------");
   
 
@@ -187,14 +200,14 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
     float temp, rh;
     char errorMessage[64];
   
-    // Wake up sensor from low-power mode
-    error = scd4x.wakeUp();
-    if (error != 0) {
-        Serial.print("SCD41 wakeUp() failed: ");
-        errorToString(error, errorMessage, sizeof(errorMessage));
-        Serial.println(errorMessage);
-        return;
-    }
+    // // Wake up sensor from low-power mode
+    // error = scd4x.wakeUp();
+    // if (error != 0) {
+    //     Serial.print("SCD41 wakeUp() failed: ");
+    //     errorToString(error, errorMessage, sizeof(errorMessage));
+    //     Serial.println(errorMessage);
+    //     return;
+    // }
 
     error = scd4x.setAmbientPressureRaw((uint16_t)(sensorData.pressure + 0.5f));
     if (error != 0) {
@@ -225,33 +238,19 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
       return;
     }
 
-    // Power down sensor
-    error = scd4x.powerDown();
-    if (error != 0) {
-        Serial.print("SCD41 powerDown() failed: ");
-        errorToString(error, errorMessage, sizeof(errorMessage));
-        Serial.println(errorMessage);
-    }
+    // // Power down sensor
+    // error = scd4x.powerDown();
+    // if (error != 0) {
+    //     Serial.print("SCD41 powerDown() failed: ");
+    //     errorToString(error, errorMessage, sizeof(errorMessage));
+    //     Serial.println(errorMessage);
+    // }
     
     // Uložení do struktury
     sensorData.scd41_co2 = co2;
     sensorData.scd41_temp = temp;
     sensorData.scd41_rh = rh;
 }
-
-// bool waitForSCD41Data(uint16_t timeout_ms) {
-//     uint32_t start = millis();
-//     bool ready = false;
-  
-//     while ((millis() - start) < timeout_ms) {
-//       scd4x.getDataReadyStatus(ready);
-//       if (ready) return true;
-//       delay(100);
-//     }
-  
-//     return false;
-//   }
-
 
   void checkBsecStatus(Bsec2 bsec) {
     if (bsec.status < BSEC_OK) {
