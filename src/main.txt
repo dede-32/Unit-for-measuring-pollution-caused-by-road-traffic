@@ -4,6 +4,7 @@
 #include <Preferences.h>
 #include "SensirionI2cScd4x.h"
 #include "SoundMeter.h"
+#include "sps30.h"
 
 
 // ==== I2C piny (přizpůsob podle potřeby) ====
@@ -33,6 +34,12 @@ struct SensorData {
 
   float dBC = NAN;
 
+  float pm1_0 = NAN;
+  float pm2_5 = NAN;
+  float pm4_0 = NAN;
+  float pm10  = NAN;
+  float typical_size = NAN;
+
   bool updated = false;
 };
 
@@ -42,6 +49,9 @@ SensorData sensorData;
 void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bsec);
 void checkBsecStatus(Bsec2 bsec);
 void readSCD41();
+void measureNoise();
+void measureSPS30();
+
 
 // ==== Setup ====
 void setup() {
@@ -118,11 +128,9 @@ void loop() {
   
     readSCD41();
 
-    pm.on("DMM4026");
-    delay(100);
-    sensorData.dBC = dmm4026.measureLeq(5);
+    measureNoise();
 
-    pm.off("DMM4026");
+    measureSPS30();
 
 
     Serial.println("----------------------BME688----------------------------");
@@ -134,6 +142,12 @@ void loop() {
     Serial.printf("CO₂: %.2u ppm, Temp: %.2f °C, Humidity: %.2f %%\n", sensorData.scd41_co2, sensorData.scd41_temp, sensorData.scd41_rh);
     Serial.println("----------------------DMM4026----------------------------");
     Serial.printf("Noise: %.2f dB(C)\n", sensorData.dBC);
+    Serial.println("----------------------SPS30----------------------------");
+    Serial.printf("PM1.0: %.2f µg/m³\n", sensorData.pm1_0);
+    Serial.printf("PM2.5: %.2f µg/m³\n", sensorData.pm2_5);
+    Serial.printf("PM4.0: %.2f µg/m³\n", sensorData.pm4_0);
+    Serial.printf("PM10 : %.2f µg/m³\n", sensorData.pm10);
+    Serial.printf("Typical Particle Size: %.2f µm\n", sensorData.typical_size);
     Serial.println("--------------------------------------------------");
   
 
@@ -251,6 +265,63 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
     sensorData.scd41_temp = temp;
     sensorData.scd41_rh = rh;
 }
+
+  void measureNoise() {
+    pm.on("DMM4026");
+    delay(100);
+    sensorData.dBC = dmm4026.measureLeq(5);
+    pm.off("DMM4026");
+  }
+
+  void measureSPS30() {
+    pm.on("SPS30");
+    delay(100);
+  
+    if (sps30_probe() != 0) {
+      Serial.println("SPS30: Sensor not found or not responding.");
+      pm.off("SPS30");
+      return;
+    }
+  
+    if (sps30_start_measurement() != 0) {
+      Serial.println("SPS30: Failed to start measurement.");
+      pm.off("SPS30");
+      return;
+    }
+  
+    delay(2000); // čekání než se připraví první data
+  
+    uint16_t data_ready = 0;
+    uint32_t timeout = millis();
+    while ((millis() - timeout) < 5000) { // čekej max 5 sekund
+      if (sps30_read_data_ready(&data_ready) == 0 && data_ready) {
+        break;
+      }
+      delay(100);
+    }
+  
+    if (!data_ready) {
+      Serial.println("SPS30: Data not ready in time.");
+      sps30_stop_measurement();
+      pm.off("SPS30");
+      return;
+    }
+  
+    struct sps30_measurement m;
+    if (sps30_read_measurement(&m) == 0) {
+      sensorData.pm1_0 = m.mc_1p0;
+      sensorData.pm2_5 = m.mc_2p5;
+      sensorData.pm4_0 = m.mc_4p0;
+      sensorData.pm10  = m.mc_10p0;
+      sensorData.typical_size = m.typical_particle_size;
+  
+    } else {
+      Serial.println("SPS30: Failed to read measurement.");
+    }
+  
+    sps30_stop_measurement();
+    pm.off("SPS30");
+  }
 
   void checkBsecStatus(Bsec2 bsec) {
     if (bsec.status < BSEC_OK) {

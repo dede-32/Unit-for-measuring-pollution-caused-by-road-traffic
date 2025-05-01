@@ -1,0 +1,37 @@
+#include <Wire.h>
+#include "sps30.h"
+#include "PowerManager.h"
+
+PowerManager pm;
+
+void setup() {
+  Serial.begin(115200);
+  Wire.begin(18, 20); // SDA = 18, SCL = 20
+  delay(1000);
+
+
+  // Inicializace PowerManageru a zapnutí napájení pro SPS30
+  pm.addSensor("SCD41", 5, true); // Always on for automatic self-calibration (ASC)
+  pm.addSensor("SPS30", 7, false);
+  pm.addSensor("BME688", 4, false); // Always on for AQI
+  pm.addSensor("DMM4026", 6, false); 
+  pm.addSensor("EN", 19, false);
+
+  char serial[SPS30_MAX_SERIAL_LEN];
+  int16_t ret = sps30_get_serial(serial);
+
+  if (ret == 0) {
+    Serial.print("SPS30 found! Serial: ");
+    Serial.println(serial);
+  } else {
+    Serial.println("SPS30 not found or communication error!");
+    Serial.print("Error code: ");
+    Serial.println(ret);
+  }
+}
+
+
+void loop() {
+    
+
+}
