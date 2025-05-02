@@ -7,15 +7,18 @@ PowerManager pm;
 void setup() {
   Serial.begin(115200);
   Wire.begin(18, 20); // SDA = 18, SCL = 20
+  sensirion_i2c_init();  // důležité!
   delay(1000);
 
 
   // Inicializace PowerManageru a zapnutí napájení pro SPS30
-  pm.addSensor("SCD41", 5, true); // Always on for automatic self-calibration (ASC)
-  pm.addSensor("SPS30", 7, false);
+  pm.addSensor("SCD41", 5, false); // Always on for automatic self-calibration (ASC)
+  pm.addSensor("SPS30", 7, true);
   pm.addSensor("BME688", 4, false); // Always on for AQI
   pm.addSensor("DMM4026", 6, false); 
   pm.addSensor("EN", 19, false);
+
+  delay(2000);
 
   char serial[SPS30_MAX_SERIAL_LEN];
   int16_t ret = sps30_get_serial(serial);
@@ -29,7 +32,6 @@ void setup() {
     Serial.println(ret);
   }
 }
-
 
 void loop() {
     

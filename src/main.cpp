@@ -1,4 +1,7 @@
+#define HELTEC_WIRELESS_STICK_LITE
 #include <heltec_unofficial.h>
+#include <RadioLib.h>
+#include <LoRaWAN_ESP32.h>
 #include "PowerManager.h"
 #include <bsec2.h>
 #include <Preferences.h>
@@ -17,6 +20,9 @@ Preferences prefs;
 Bsec2 bsec;
 SensirionI2cScd4x scd4x;
 SoundLevelMeter dmm4026;
+
+// SX1262 radio = new Module(8, 14, 12, 13);
+LoRaWANNode* node;
 
 
 struct SensorData {
@@ -51,12 +57,12 @@ void checkBsecStatus(Bsec2 bsec);
 void readSCD41();
 void measureNoise();
 void measureSPS30();
+void sendLoRaWANData();
 
 
 // ==== Setup ====
 void setup() {
-  Serial.begin(115200);
-  while (!Serial) delay(10);
+  heltec_setup();
   pm.disableWiFiAndBT();
   Wire.begin(SDA_PIN, SCL_PIN);
 
@@ -114,6 +120,24 @@ void setup() {
   dmm4026.begin();
   pm.off("DMM4026");
 
+  // ==== Inicializace SPS30 ====
+  sensirion_i2c_init();
+
+  int16_t state = radio.begin(868, 125.0, 12, 5, 0x34, 10, 8, 1.6, false);
+  if (state != RADIOLIB_ERR_NONE) {
+    Serial.println("LoRa radio init failed.");
+  }
+
+  node = persist.manage(&radio);
+
+  if (!node->isActivated()) {
+    Serial.println("Could not join network.");
+  } else {
+    node->setDutyCycle(true, 1250); // FUP dodržení
+  }
+
+
+
   Serial.println("Setup complete. Waiting for first data...");
 }
 
@@ -149,7 +173,9 @@ void loop() {
     Serial.printf("PM10 : %.2f µg/m³\n", sensorData.pm10);
     Serial.printf("Typical Particle Size: %.2f µm\n", sensorData.typical_size);
     Serial.println("--------------------------------------------------");
-  
+
+    void sendLoRaWANData();
+    delay(500);
 
     const unsigned long sleepTimeMs = 300000UL - 10000UL;
   
@@ -275,7 +301,7 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
 
   void measureSPS30() {
     pm.on("SPS30");
-    delay(100);
+    delay(500);
   
     if (sps30_probe() != 0) {
       Serial.println("SPS30: Sensor not found or not responding.");
@@ -288,16 +314,18 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
       pm.off("SPS30");
       return;
     }
-  
-    delay(2000); // čekání než se připraví první data
-  
+    
+    delay(10000);
+
     uint16_t data_ready = 0;
-    uint32_t timeout = millis();
-    while ((millis() - timeout) < 5000) { // čekej max 5 sekund
-      if (sps30_read_data_ready(&data_ready) == 0 && data_ready) {
-        break;
-      }
-      delay(100);
+    const uint32_t start = millis();
+    const uint32_t timeout_ms = 10000;  // maximálně čekej 10 sekund
+
+    while ((millis() - start) < timeout_ms) {
+        if (sps30_read_data_ready(&data_ready) == 0 && data_ready) {
+            break;
+        }
+        delay(200);
     }
   
     if (!data_ready) {
@@ -333,3 +361,46 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
       while (true);
     }
   }
+
+  void sendLoRaWANData() {
+    if (!node || !node->isActivated()) {
+      Serial.println("LoRaWAN node not ready.");
+      return;
+    }
+  
+    uint8_t payload[25];
+    uint8_t i = 0;
+    
+    payload[i++] = constrain((int)sensorData.iaq, 0, 500);
+    payload[i++] = sensorData.iaqAccuracy;
+    payload[i++] = (int)(sensorData.temperature + 40);
+    payload[i++] = (int)sensorData.humidity;
+    uint16_t press = (uint16_t)(sensorData.pressure * 10);
+    payload[i++] = press >> 8; payload[i++] = press & 0xFF;
+    payload[i++] = sensorData.bsec_co2 >> 8; payload[i++] = sensorData.bsec_co2 & 0xFF;
+    payload[i++] = (uint16_t)(sensorData.bvoc * 100) >> 8;
+    payload[i++] = (uint16_t)(sensorData.bvoc * 100) & 0xFF;
+    payload[i++] = sensorData.scd41_co2 >> 8; payload[i++] = sensorData.scd41_co2 & 0xFF;
+    payload[i++] = (int)(sensorData.scd41_temp + 40);
+    payload[i++] = (int)sensorData.scd41_rh;
+    payload[i++] = (int)sensorData.dBC;
+    #define PM(val) (uint16_t)(val * 10)
+    payload[i++] = PM(sensorData.pm1_0) >> 8; payload[i++] = PM(sensorData.pm1_0) & 0xFF;
+    payload[i++] = PM(sensorData.pm2_5) >> 8; payload[i++] = PM(sensorData.pm2_5) & 0xFF;
+    payload[i++] = PM(sensorData.pm4_0) >> 8; payload[i++] = PM(sensorData.pm4_0) & 0xFF;
+    payload[i++] = PM(sensorData.pm10)  >> 8; payload[i++] = PM(sensorData.pm10)  & 0xFF;
+    payload[i++] = (uint8_t)(sensorData.typical_size * 10);
+
+    uint8_t downlinkData[256];  // Případně menší, pokud nečekáš nic
+    size_t lenDown = sizeof(downlinkData);
+  
+    int16_t state = node->sendReceive(payload, sizeof(payload), 1, downlinkData, &lenDown);
+    if(state == RADIOLIB_ERR_NONE) {
+      Serial.println("Message sent, no downlink received.");
+    } else if (state > 0) {
+      Serial.println("Message sent, downlink received.");
+    } else {
+      Serial.printf("sendReceive returned error %d, we'll try again later.\n", state);
+    }
+  }
+  
