@@ -4,7 +4,7 @@
 #include <LoRaWAN_ESP32.h>
 #include "PowerManager.h"
 #include <bsec2.h>
-#include <Preferences.h>
+// #include <Preferences.h>
 #include "SensirionI2cScd4x.h"
 #include "SoundMeter.h"
 #include "sps30.h"
@@ -16,7 +16,7 @@
 
 // ==== Globální proměnné ====
 PowerManager pm;
-Preferences prefs;
+// Preferences prefs;
 Bsec2 bsec;
 SensirionI2cScd4x scd4x;
 SoundLevelMeter dmm4026;
@@ -73,23 +73,23 @@ void setup() {
   pm.addSensor("DMM4026", 6, false); 
   pm.addSensor("EN", 19, false);
 
-  // ==== Načtení stavu BSEC ====
-  prefs.begin("bsec", true);
-  int stateLen = prefs.getBytesLength("iaqState");
-  Serial.print("Stored state length in flash: ");
-  Serial.println(stateLen);
-  if (stateLen > 0 && stateLen <= BSEC_MAX_STATE_BLOB_SIZE) {
-    uint8_t state[BSEC_MAX_STATE_BLOB_SIZE];
-    prefs.getBytes("iaqState", state, stateLen);
-    if (bsec.setState(state)) {
-      Serial.println("BSEC state loaded from flash");
-    } else {
-      Serial.println("Failed to apply BSEC state");
-    }
-  } else {
-    Serial.println("No BSEC state found in flash");
-  }
-  prefs.end();
+  // // ==== Načtení stavu BSEC ====
+  // prefs.begin("bsec", true);
+  // int stateLen = prefs.getBytesLength("iaqState");
+  // Serial.print("Stored state length in flash: ");
+  // Serial.println(stateLen);
+  // if (stateLen > 0 && stateLen <= BSEC_MAX_STATE_BLOB_SIZE) {
+  //   uint8_t state[BSEC_MAX_STATE_BLOB_SIZE];
+  //   prefs.getBytes("iaqState", state, stateLen);
+  //   if (bsec.setState(state)) {
+  //     Serial.println("BSEC state loaded from flash");
+  //   } else {
+  //     Serial.println("Failed to apply BSEC state");
+  //   }
+  // } else {
+  //   Serial.println("No BSEC state found in flash");
+  // }
+  // prefs.end();
 
   // ==== Inicializace BME688 ====
   if (!bsec.begin(BME68X_I2C_ADDR_LOW, Wire)) {
@@ -123,26 +123,37 @@ void setup() {
   // ==== Inicializace SPS30 ====
   sensirion_i2c_init();
 
+  // ==== Inicializace RADIO ====
+  Serial.println("Radio init");
   int16_t state = radio.begin(868, 125.0, 12, 5, 0x34, 10, 8, 1.6, false);
   if (state != RADIOLIB_ERR_NONE) {
-    Serial.println("LoRa radio init failed.");
+    Serial.println("Radio did not initialize.");
   }
 
   node = persist.manage(&radio);
 
   if (!node->isActivated()) {
     Serial.println("Could not join network.");
-  } else {
-    node->setDutyCycle(true, 1250); // FUP dodržení
   }
-
-
-
+  persist.saveSession(node);
+  
+  node->setDutyCycle(true, 1250); // FUP dodržení
+  
   Serial.println("Setup complete. Waiting for first data...");
 }
 
 // ==== Loop ====
 void loop() {
+
+    if (!node || !node->isActivated()) {
+      Serial.println("Session not active. Trying to rejoin.");
+      node = persist.manage(&radio);
+      if (!node->isActivated()) {
+        Serial.println("Rejoin failed.");
+        delay(10000);
+        return;
+      }
+    }
     sensorData.updated = false;
   
     while (!sensorData.updated) {
@@ -155,7 +166,6 @@ void loop() {
     measureNoise();
 
     measureSPS30();
-
 
     Serial.println("----------------------BME688----------------------------");
     Serial.printf("IAQ: %.2f (accuracy: %d)\n", sensorData.iaq, sensorData.iaqAccuracy);
@@ -174,11 +184,12 @@ void loop() {
     Serial.printf("Typical Particle Size: %.2f µm\n", sensorData.typical_size);
     Serial.println("--------------------------------------------------");
 
-    void sendLoRaWANData();
+    Serial.println("Jump to sendLoRaWANData function.");
+    sendLoRaWANData();
     delay(500);
 
     const unsigned long sleepTimeMs = 300000UL - 10000UL;
-  
+    persist.saveSession(node);
     Serial.print("Going to light sleep for ");
     Serial.print(sleepTimeMs / 1000);
     Serial.println(" seconds...\n");
@@ -198,20 +209,20 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
           sensorData.iaq = o.signal;
           sensorData.iaqAccuracy = o.accuracy;
   
-          // Uložení stavu při dosažení plné kalibrace
-          static bool stateSaved = false;
-          if (!stateSaved && sensorData.iaqAccuracy == 3) {
-            uint8_t state[BSEC_MAX_STATE_BLOB_SIZE];
-            uint32_t stateLen = bsec.getState(state);
-            if (stateLen > 10 && stateLen <= BSEC_MAX_STATE_BLOB_SIZE) {
-                prefs.begin("bsec", false);
-                prefs.putBytes("iaqState", state, stateLen);
-                prefs.end();
-              }
+          // // Uložení stavu při dosažení plné kalibrace
+          // static bool stateSaved = false;
+          // if (!stateSaved && sensorData.iaqAccuracy == 3) {
+          //   uint8_t state[BSEC_MAX_STATE_BLOB_SIZE];
+          //   uint32_t stateLen = bsec.getState(state);
+          //   if (stateLen > 10 && stateLen <= BSEC_MAX_STATE_BLOB_SIZE) {
+          //       prefs.begin("bsec", false);
+          //       prefs.putBytes("iaqState", state, stateLen);
+          //       prefs.end();
+          //     }
   
-            Serial.println("BSEC state saved to flash");
-            stateSaved = true;
-          }
+          //   Serial.println("BSEC state saved to flash");
+          //   stateSaved = true;
+          // }
           break;
   
         case BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE:
@@ -368,33 +379,41 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
       return;
     }
   
-    uint8_t payload[25];
-    uint8_t i = 0;
+    uint8_t payload[32];
+    uint8_t j = 0;
+
+    auto addUint8 = [&](uint8_t value) {
+      if (j < sizeof(payload)) payload[j++] = value;
+    };
+  
+    auto addUint16 = [&](uint16_t value) {
+      if (j + 1 < sizeof(payload)) {
+        payload[j++] = value >> 8;
+        payload[j++] = value & 0xFF;
+      }
+    };
     
-    payload[i++] = constrain((int)sensorData.iaq, 0, 500);
-    payload[i++] = sensorData.iaqAccuracy;
-    payload[i++] = (int)(sensorData.temperature + 40);
-    payload[i++] = (int)sensorData.humidity;
-    uint16_t press = (uint16_t)(sensorData.pressure * 10);
-    payload[i++] = press >> 8; payload[i++] = press & 0xFF;
-    payload[i++] = sensorData.bsec_co2 >> 8; payload[i++] = sensorData.bsec_co2 & 0xFF;
-    payload[i++] = (uint16_t)(sensorData.bvoc * 100) >> 8;
-    payload[i++] = (uint16_t)(sensorData.bvoc * 100) & 0xFF;
-    payload[i++] = sensorData.scd41_co2 >> 8; payload[i++] = sensorData.scd41_co2 & 0xFF;
-    payload[i++] = (int)(sensorData.scd41_temp + 40);
-    payload[i++] = (int)sensorData.scd41_rh;
-    payload[i++] = (int)sensorData.dBC;
-    #define PM(val) (uint16_t)(val * 10)
-    payload[i++] = PM(sensorData.pm1_0) >> 8; payload[i++] = PM(sensorData.pm1_0) & 0xFF;
-    payload[i++] = PM(sensorData.pm2_5) >> 8; payload[i++] = PM(sensorData.pm2_5) & 0xFF;
-    payload[i++] = PM(sensorData.pm4_0) >> 8; payload[i++] = PM(sensorData.pm4_0) & 0xFF;
-    payload[i++] = PM(sensorData.pm10)  >> 8; payload[i++] = PM(sensorData.pm10)  & 0xFF;
-    payload[i++] = (uint8_t)(sensorData.typical_size * 10);
+    addUint8(constrain((int)sensorData.iaq, 0, 500));
+    addUint8(sensorData.iaqAccuracy);
+    addUint8((int)(sensorData.temperature + 40));
+    addUint8((int)sensorData.humidity);
+    addUint16((uint16_t)(sensorData.pressure * 10));
+    addUint16(sensorData.bsec_co2);
+    addUint16((uint16_t)(sensorData.bvoc * 100));
+    addUint16(sensorData.scd41_co2);
+    addUint8((int)(sensorData.scd41_temp + 40));
+    addUint8((int)sensorData.scd41_rh);
+    addUint8((int)sensorData.dBC);
+    addUint16((uint16_t)(sensorData.pm1_0 * 10));
+    addUint16((uint16_t)(sensorData.pm2_5 * 10));
+    addUint16((uint16_t)(sensorData.pm4_0 * 10));
+    addUint16((uint16_t)(sensorData.pm10 * 10));
+    addUint8((uint8_t)(sensorData.typical_size * 10));
 
     uint8_t downlinkData[256];  // Případně menší, pokud nečekáš nic
     size_t lenDown = sizeof(downlinkData);
   
-    int16_t state = node->sendReceive(payload, sizeof(payload), 1, downlinkData, &lenDown);
+    int16_t state = node->sendReceive(payload, j, 1, downlinkData, &lenDown);
     if(state == RADIOLIB_ERR_NONE) {
       Serial.println("Message sent, no downlink received.");
     } else if (state > 0) {
