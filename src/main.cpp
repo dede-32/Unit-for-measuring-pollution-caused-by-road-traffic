@@ -125,7 +125,7 @@ void setup() {
 
   // ==== Inicializace RADIO ====
   Serial.println("Radio init");
-  int16_t state = radio.begin(868, 125.0, 12, 5, 0x34, 10, 8, 1.6, false);
+  int16_t state = radio.begin(868, 125.0, 7, 5, 0x34, 10, 8, 1.6, false);
   if (state != RADIOLIB_ERR_NONE) {
     Serial.println("Radio did not initialize.");
   }
@@ -394,21 +394,21 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
     };
     
     addUint8(constrain((int)sensorData.iaq, 0, 500));
-    addUint8(sensorData.iaqAccuracy);
+    // addUint8(sensorData.iaqAccuracy);
     addUint8((int)(sensorData.temperature + 40));
     addUint8((int)sensorData.humidity);
     addUint16((uint16_t)(sensorData.pressure * 10));
-    addUint16(sensorData.bsec_co2);
+    // addUint16(sensorData.bsec_co2);
     addUint16((uint16_t)(sensorData.bvoc * 100));
     addUint16(sensorData.scd41_co2);
-    addUint8((int)(sensorData.scd41_temp + 40));
-    addUint8((int)sensorData.scd41_rh);
+    // addUint8((int)(sensorData.scd41_temp + 40));
+    // addUint8((int)sensorData.scd41_rh);
     addUint8((int)sensorData.dBC);
-    addUint16((uint16_t)(sensorData.pm1_0 * 10));
-    addUint16((uint16_t)(sensorData.pm2_5 * 10));
-    addUint16((uint16_t)(sensorData.pm4_0 * 10));
+    // addUint16((uint16_t)(sensorData.pm1_0 * 10));
+    // addUint16((uint16_t)(sensorData.pm2_5 * 10));
+    // addUint16((uint16_t)(sensorData.pm4_0 * 10));
     addUint16((uint16_t)(sensorData.pm10 * 10));
-    addUint8((uint8_t)(sensorData.typical_size * 10));
+    // addUint8((uint8_t)(sensorData.typical_size * 10));
 
     uint8_t downlinkData[256];  // Případně menší, pokud nečekáš nic
     size_t lenDown = sizeof(downlinkData);
