@@ -1,55 +1,31 @@
-#define HELTEC_WIRELESS_STICK_LITE
 #include <heltec_unofficial.h>
 #include <RadioLib.h>
 #include <LoRaWAN_ESP32.h>
 #include "PowerManager.h"
+#include "SensorData.h"
 #include <bsec2.h>
 // #include <Preferences.h>
 #include "SensirionI2cScd4x.h"
 #include "SoundMeter.h"
-#include "sps30.h"
+// #include "sps30.h"
+#include "SPS30Manager.h"
 
-
-// ==== I2C piny (přizpůsob podle potřeby) ====
+// ==== I2C piny ====
 #define SDA_PIN 18
 #define SCL_PIN 20
 
+const bool LORA_ENABLED = false;
+static int64_t nextCycleUs = 0;
+
 // ==== Globální proměnné ====
 PowerManager pm;
+SensorData sensorData;
 // Preferences prefs;
 Bsec2 bsec;
 SensirionI2cScd4x scd4x;
 SoundLevelMeter dmm4026;
-
-// SX1262 radio = new Module(8, 14, 12, 13);
+SPS30Manager sps30;
 LoRaWANNode* node;
-
-
-struct SensorData {
-  float iaq = NAN;
-  uint8_t iaqAccuracy = 0;
-  float temperature = NAN;
-  float humidity = NAN;
-  float pressure = NAN;
-  uint16_t bsec_co2 = 0;
-  float bvoc = NAN;
-
-  uint16_t scd41_co2 = 0;
-  float scd41_temp = NAN;
-  float scd41_rh = NAN;
-
-  float dBC = NAN;
-
-  float pm1_0 = NAN;
-  float pm2_5 = NAN;
-  float pm4_0 = NAN;
-  float pm10  = NAN;
-  float typical_size = NAN;
-
-  bool updated = false;
-};
-
-SensorData sensorData;
 
 
 void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bsec);
@@ -71,7 +47,8 @@ void setup() {
   pm.addSensor("SPS30", 7, false);
   pm.addSensor("BME688", 4, true); // Always on for AQI
   pm.addSensor("DMM4026", 6, false); 
-  pm.addSensor("EN", 19, false);
+
+
 
   // // ==== Načtení stavu BSEC ====
   // prefs.begin("bsec", true);
@@ -121,30 +98,46 @@ void setup() {
   pm.off("DMM4026");
 
   // ==== Inicializace SPS30 ====
-  sensirion_i2c_init();
+  sps30.begin(&pm, 19); // 19 je pin EN, uprav dle potřeby
 
   // ==== Inicializace RADIO ====
-  Serial.println("Radio init");
-  int16_t state = radio.begin(868, 125.0, 7, 5, 0x34, 10, 8, 1.6, false);
-  if (state != RADIOLIB_ERR_NONE) {
-    Serial.println("Radio did not initialize.");
-  }
-
-  node = persist.manage(&radio);
-
-  if (!node->isActivated()) {
-    Serial.println("Could not join network.");
-  }
-  persist.saveSession(node);
+  if (LORA_ENABLED) {
+    Serial.println("Radio init");
+    int16_t state = radio.begin(868, 125.0, 7, 5, 0x34, 10, 8, 1.6, false);
+    if (state != RADIOLIB_ERR_NONE) {
+      Serial.println("Radio did not initialize.");
+    }
   
-  node->setDutyCycle(true, 1250); // FUP dodržení
+    node = persist.manage(&radio);
+  
+    if (!node->isActivated()) {
+      Serial.println("Could not join network.");
+    }
+  
+    persist.saveSession(node);
+    node->setDutyCycle(true, 1250);
+  }
   
   Serial.println("Setup complete. Waiting for first data...");
 }
 
 // ==== Loop ====
 void loop() {
+  int64_t nowUs = esp_timer_get_time();
 
+  if (nextCycleUs == 0 || nowUs > nextCycleUs + 10 * 60 * 1000000LL) {
+    nextCycleUs = nowUs + 290000000LL; // 290 s
+  }
+  Serial.printf("Cycle started at: %lld s\n", nowUs / 1000000);
+
+  float vbat = heltec_vbat();
+  sensorData.battery_percent = heltec_battery_percent(vbat);
+
+
+
+  sps30.startMeasurement();
+
+  if (LORA_ENABLED) {
     if (!node || !node->isActivated()) {
       Serial.println("Session not active. Trying to rejoin.");
       node = persist.manage(&radio);
@@ -154,6 +147,7 @@ void loop() {
         return;
       }
     }
+  }
     sensorData.updated = false;
   
     while (!sensorData.updated) {
@@ -165,8 +159,10 @@ void loop() {
 
     measureNoise();
 
-    measureSPS30();
+    sps30.finishMeasurement(sensorData);
 
+    Serial.println("----------------------Battery----------------------------");
+    Serial.printf("Battery: %.0f %%\n", sensorData.battery_percent);
     Serial.println("----------------------BME688----------------------------");
     Serial.printf("IAQ: %.2f (accuracy: %d)\n", sensorData.iaq, sensorData.iaqAccuracy);
     Serial.printf("Temp: %.2f °C, Humidity: %.2f %%\n", sensorData.temperature, sensorData.humidity);
@@ -184,19 +180,24 @@ void loop() {
     Serial.printf("Typical Particle Size: %.2f µm\n", sensorData.typical_size);
     Serial.println("--------------------------------------------------");
 
+    if (LORA_ENABLED) {
     Serial.println("Jump to sendLoRaWANData function.");
     sendLoRaWANData();
-    delay(500);
-
-    const unsigned long sleepTimeMs = 300000UL - 10000UL;
     persist.saveSession(node);
-    Serial.print("Going to light sleep for ");
-    Serial.print(sleepTimeMs / 1000);
-    Serial.println(" seconds...\n");
-    delay(100);
+    }
 
-    esp_sleep_enable_timer_wakeup(sleepTimeMs * 1000ULL);
-    esp_light_sleep_start();
+    int64_t afterUs = esp_timer_get_time();
+    int64_t sleepUs = (nextCycleUs > afterUs) ? (nextCycleUs - afterUs) : 1000000;
+  
+    Serial.printf("Cycle finished at: %lld s\n", afterUs / 1000000);
+    Serial.printf("Sleeping for: %lld seconds...\n\n", sleepUs / 1000000);
+
+  delay(100);  // rezerva pro stabilizaci
+
+  esp_sleep_enable_timer_wakeup(sleepUs);
+  esp_light_sleep_start();
+
+  nextCycleUs += 290000000LL; // Další cyklus za 290 s
   }
 
 // ==== Callback z BSEC2 ====
@@ -410,7 +411,7 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
     addUint16((uint16_t)(sensorData.pm10 * 10));
     // addUint8((uint8_t)(sensorData.typical_size * 10));
 
-    uint8_t downlinkData[256];  // Případně menší, pokud nečekáš nic
+    uint8_t downlinkData[256];
     size_t lenDown = sizeof(downlinkData);
   
     int16_t state = node->sendReceive(payload, j, 1, downlinkData, &lenDown);
