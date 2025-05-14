@@ -7,14 +7,13 @@
 // #include <Preferences.h>
 #include "SensirionI2cScd4x.h"
 #include "SoundMeter.h"
-// #include "sps30.h"
 #include "SPS30Manager.h"
 
 // ==== I2C piny ====
 #define SDA_PIN 18
 #define SCL_PIN 20
 
-const bool LORA_ENABLED = false;
+const bool LORA_ENABLED = true;
 static int64_t nextCycleUs = 0;
 
 // ==== Globální proměnné ====
@@ -32,7 +31,6 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
 void checkBsecStatus(Bsec2 bsec);
 void readSCD41();
 void measureNoise();
-void measureSPS30();
 void sendLoRaWANData();
 
 
@@ -90,6 +88,13 @@ void setup() {
 
   // ==== Inicializace SCD41 ====
   scd4x.begin(Wire, 0x62);
+  int16_t err = scd4x.performFactoryReset();
+  if (err != 0) {
+    Serial.print("Reset failed! Error: ");
+    Serial.println(err);
+  } else {
+    Serial.println("SCD41 reset successful.");
+  }
 
   // ==== Inicializace DMM4026 ====
   pm.on("DMM4026");
@@ -103,7 +108,7 @@ void setup() {
   // ==== Inicializace RADIO ====
   if (LORA_ENABLED) {
     Serial.println("Radio init");
-    int16_t state = radio.begin(868, 125.0, 7, 5, 0x34, 10, 8, 1.6, false);
+    int16_t state = radio.begin(868, 125.0, 12, 5, 0x34, 10, 8, 1.6, false);
     if (state != RADIOLIB_ERR_NONE) {
       Serial.println("Radio did not initialize.");
     }
@@ -123,82 +128,86 @@ void setup() {
 
 // ==== Loop ====
 void loop() {
+  const int64_t CYCLE_INTERVAL_US = 310000000LL;
   int64_t nowUs = esp_timer_get_time();
 
-  if (nextCycleUs == 0 || nowUs > nextCycleUs + 10 * 60 * 1000000LL) {
-    nextCycleUs = nowUs + 290000000LL; // 290 s
+  if (nextCycleUs == 0) {
+    nextCycleUs = nowUs + CYCLE_INTERVAL_US;
   }
+
   Serial.printf("Cycle started at: %lld s\n", nowUs / 1000000);
 
   float vbat = heltec_vbat();
   sensorData.battery_percent = heltec_battery_percent(vbat);
 
-
-
   sps30.startMeasurement();
 
+  sensorData.updated = false;
+  while (!sensorData.updated) {
+    bsec.run();
+    delay(100);
+  }
+
+  readSCD41();
+  measureNoise();
+  sps30.finishMeasurement(sensorData);
+
+  Serial.println("----------------------Battery----------------------------");
+  Serial.printf("Battery: %.0f %%\n", sensorData.battery_percent);
+  Serial.println("----------------------BME688----------------------------");
+  Serial.printf("IAQ: %.2f (accuracy: %d)\n", sensorData.iaq, sensorData.iaqAccuracy);
+  Serial.printf("Temp: %.2f °C, Humidity: %.2f %%\n", sensorData.temperature, sensorData.humidity);
+  Serial.printf("Pressure: %.2f hPa\n", sensorData.pressure);
+  Serial.printf("CO₂eq: %.2u ppm, bVOC: %.2f ppm\n", sensorData.bsec_co2, sensorData.bvoc);
+  Serial.println("----------------------SCD41----------------------------");
+  Serial.printf("CO₂: %.2u ppm, Temp: %.2f °C, Humidity: %.2f %%\n", sensorData.scd41_co2, sensorData.scd41_temp, sensorData.scd41_rh);
+  Serial.println("----------------------DMM4026----------------------------");
+  Serial.printf("Noise: %.2f dB(C)\n", sensorData.dBC);
+  Serial.println("----------------------SPS30----------------------------");
+  Serial.printf("PM1.0:     %.2f µg/m³\n", sensorData.pm1_0);
+  Serial.printf("PM2.5:     %.2f µg/m³\n", sensorData.pm1_0_2_5);
+  Serial.printf("PM4.0:     %.2f µg/m³\n", sensorData.pm2_5_4_0);
+  Serial.printf("PM10:      %.2f µg/m³\n", sensorData.pm4_0_10);
+  Serial.printf("Typical Particle Size: %.2f µm\n", sensorData.typical_size);
+  Serial.println("--------------------------------------------------");
+  
+
   if (LORA_ENABLED) {
-    if (!node || !node->isActivated()) {
-      Serial.println("Session not active. Trying to rejoin.");
-      node = persist.manage(&radio);
-      if (!node->isActivated()) {
-        Serial.println("Rejoin failed.");
-        delay(10000);
-        return;
+    for (int attempt = 1; attempt <= 1; attempt++) {
+      if (!node || !node->isActivated()) {
+        Serial.printf("Session not active. Rejoin attempt %d...\n", attempt);
+        node = persist.manage(&radio);
+        if (node && node->isActivated()) {
+          break; // připojení úspěšné
+        }
+        delay(2000); // krátká pauza mezi pokusy
       }
     }
+  
+    if (node && node->isActivated()) {
+      Serial.println("Jump to sendLoRaWANData function.");
+      sendLoRaWANData();
+      persist.saveSession(node);
+    } else {
+      Serial.println("LoRa rejoin failed. Skipping transmission.");
+    }
   }
-    sensorData.updated = false;
-  
-    while (!sensorData.updated) {
-      bsec.run();
-      delay(100);
-    }
-  
-    readSCD41();
 
-    measureNoise();
+  int64_t afterUs = esp_timer_get_time();
+  int64_t sleepUs = (nextCycleUs > afterUs) ? (nextCycleUs - afterUs) : 1000000;
 
-    sps30.finishMeasurement(sensorData);
+  Serial.printf("Cycle finished at: %lld s\n", afterUs / 1000000);
+  Serial.printf("Sleeping for: %lld seconds...\n\n", sleepUs / 1000000);
 
-    Serial.println("----------------------Battery----------------------------");
-    Serial.printf("Battery: %.0f %%\n", sensorData.battery_percent);
-    Serial.println("----------------------BME688----------------------------");
-    Serial.printf("IAQ: %.2f (accuracy: %d)\n", sensorData.iaq, sensorData.iaqAccuracy);
-    Serial.printf("Temp: %.2f °C, Humidity: %.2f %%\n", sensorData.temperature, sensorData.humidity);
-    Serial.printf("Pressure: %.2f hPa\n", sensorData.pressure);
-    Serial.printf("CO₂eq: %.2u ppm, bVOC: %.2f ppm\n", sensorData.bsec_co2, sensorData.bvoc);
-    Serial.println("----------------------SCD41----------------------------");
-    Serial.printf("CO₂: %.2u ppm, Temp: %.2f °C, Humidity: %.2f %%\n", sensorData.scd41_co2, sensorData.scd41_temp, sensorData.scd41_rh);
-    Serial.println("----------------------DMM4026----------------------------");
-    Serial.printf("Noise: %.2f dB(C)\n", sensorData.dBC);
-    Serial.println("----------------------SPS30----------------------------");
-    Serial.printf("PM1.0: %.2f µg/m³\n", sensorData.pm1_0);
-    Serial.printf("PM2.5: %.2f µg/m³\n", sensorData.pm2_5);
-    Serial.printf("PM4.0: %.2f µg/m³\n", sensorData.pm4_0);
-    Serial.printf("PM10 : %.2f µg/m³\n", sensorData.pm10);
-    Serial.printf("Typical Particle Size: %.2f µm\n", sensorData.typical_size);
-    Serial.println("--------------------------------------------------");
-
-    if (LORA_ENABLED) {
-    Serial.println("Jump to sendLoRaWANData function.");
-    sendLoRaWANData();
-    persist.saveSession(node);
-    }
-
-    int64_t afterUs = esp_timer_get_time();
-    int64_t sleepUs = (nextCycleUs > afterUs) ? (nextCycleUs - afterUs) : 1000000;
-  
-    Serial.printf("Cycle finished at: %lld s\n", afterUs / 1000000);
-    Serial.printf("Sleeping for: %lld seconds...\n\n", sleepUs / 1000000);
-
-  delay(100);  // rezerva pro stabilizaci
-
+  delay(100);  // bezpečnostní rezerva
   esp_sleep_enable_timer_wakeup(sleepUs);
   esp_light_sleep_start();
 
-  nextCycleUs += 290000000LL; // Další cyklus za 290 s
-  }
+  nextCycleUs += CYCLE_INTERVAL_US;  // Posuň se na další pevný interval
+}
+
+
+
 
 // ==== Callback z BSEC2 ====
 void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bsec) {
@@ -251,15 +260,6 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
     uint16_t co2, error;
     float temp, rh;
     char errorMessage[64];
-  
-    // // Wake up sensor from low-power mode
-    // error = scd4x.wakeUp();
-    // if (error != 0) {
-    //     Serial.print("SCD41 wakeUp() failed: ");
-    //     errorToString(error, errorMessage, sizeof(errorMessage));
-    //     Serial.println(errorMessage);
-    //     return;
-    // }
 
     error = scd4x.setAmbientPressureRaw((uint16_t)(sensorData.pressure + 0.5f));
     if (error != 0) {
@@ -289,14 +289,6 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
       pm.off("SCD41");
       return;
     }
-
-    // // Power down sensor
-    // error = scd4x.powerDown();
-    // if (error != 0) {
-    //     Serial.print("SCD41 powerDown() failed: ");
-    //     errorToString(error, errorMessage, sizeof(errorMessage));
-    //     Serial.println(errorMessage);
-    // }
     
     // Uložení do struktury
     sensorData.scd41_co2 = co2;
@@ -309,58 +301,6 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
     delay(100);
     sensorData.dBC = dmm4026.measureLeq(5);
     pm.off("DMM4026");
-  }
-
-  void measureSPS30() {
-    pm.on("SPS30");
-    delay(500);
-  
-    if (sps30_probe() != 0) {
-      Serial.println("SPS30: Sensor not found or not responding.");
-      pm.off("SPS30");
-      return;
-    }
-  
-    if (sps30_start_measurement() != 0) {
-      Serial.println("SPS30: Failed to start measurement.");
-      pm.off("SPS30");
-      return;
-    }
-    
-    delay(10000);
-
-    uint16_t data_ready = 0;
-    const uint32_t start = millis();
-    const uint32_t timeout_ms = 10000;  // maximálně čekej 10 sekund
-
-    while ((millis() - start) < timeout_ms) {
-        if (sps30_read_data_ready(&data_ready) == 0 && data_ready) {
-            break;
-        }
-        delay(200);
-    }
-  
-    if (!data_ready) {
-      Serial.println("SPS30: Data not ready in time.");
-      sps30_stop_measurement();
-      pm.off("SPS30");
-      return;
-    }
-  
-    struct sps30_measurement m;
-    if (sps30_read_measurement(&m) == 0) {
-      sensorData.pm1_0 = m.mc_1p0;
-      sensorData.pm2_5 = m.mc_2p5;
-      sensorData.pm4_0 = m.mc_4p0;
-      sensorData.pm10  = m.mc_10p0;
-      sensorData.typical_size = m.typical_particle_size;
-  
-    } else {
-      Serial.println("SPS30: Failed to read measurement.");
-    }
-  
-    sps30_stop_measurement();
-    pm.off("SPS30");
   }
 
   void checkBsecStatus(Bsec2 bsec) {
@@ -395,21 +335,22 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
     };
     
     addUint8(constrain((int)sensorData.iaq, 0, 500));
-    // addUint8(sensorData.iaqAccuracy);
+    addUint8(sensorData.iaqAccuracy);
     addUint8((int)(sensorData.temperature + 40));
     addUint8((int)sensorData.humidity);
     addUint16((uint16_t)(sensorData.pressure * 10));
     // addUint16(sensorData.bsec_co2);
     addUint16((uint16_t)(sensorData.bvoc * 100));
     addUint16(sensorData.scd41_co2);
+    addUint8((int)sensorData.dBC);
+    addUint16((uint16_t)(sensorData.pm1_0 * 10));
+    addUint16((uint16_t)(sensorData.pm1_0_2_5 * 10));
+    addUint16((uint16_t)(sensorData.pm2_5_4_0 * 10));
+    addUint16((uint16_t)(sensorData.pm4_0_10 * 10));
+    addUint8((uint8_t)(sensorData.typical_size * 10));
+
     // addUint8((int)(sensorData.scd41_temp + 40));
     // addUint8((int)sensorData.scd41_rh);
-    addUint8((int)sensorData.dBC);
-    // addUint16((uint16_t)(sensorData.pm1_0 * 10));
-    // addUint16((uint16_t)(sensorData.pm2_5 * 10));
-    // addUint16((uint16_t)(sensorData.pm4_0 * 10));
-    addUint16((uint16_t)(sensorData.pm10 * 10));
-    // addUint8((uint8_t)(sensorData.typical_size * 10));
 
     uint8_t downlinkData[256];
     size_t lenDown = sizeof(downlinkData);

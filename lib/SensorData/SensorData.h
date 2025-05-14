@@ -15,11 +15,17 @@ struct SensorData {
 
   float dBC = NAN;
 
+  // Celkové hodnoty PM
   float pm1_0 = NAN;
   float pm2_5 = NAN;
   float pm4_0 = NAN;
   float pm10  = NAN;
   float typical_size = NAN;
+
+  // Vypočtené frakce
+  float pm1_0_2_5 = NAN;
+  float pm2_5_4_0 = NAN;
+  float pm4_0_10  = NAN;
 
   float battery_percent = NAN;
 

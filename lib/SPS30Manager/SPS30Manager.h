@@ -9,6 +9,8 @@ public:
   void begin(PowerManager* pm, uint8_t enPin = 19);
   void startMeasurement();
   void finishMeasurement(SensorData& dest);
+  unsigned long getStartTime() const;
+  void forceReadMeasurement(SensorData& dest);
 
 private:
   PowerManager* _pm = nullptr;
