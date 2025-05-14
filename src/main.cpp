@@ -4,7 +4,6 @@
 #include "PowerManager.h"
 #include "SensorData.h"
 #include <bsec2.h>
-// #include <Preferences.h>
 #include "SensirionI2cScd4x.h"
 #include "SoundMeter.h"
 #include "SPS30Manager.h"
@@ -19,7 +18,6 @@ static int64_t nextCycleUs = 0;
 // ==== Globální proměnné ====
 PowerManager pm;
 SensorData sensorData;
-// Preferences prefs;
 Bsec2 bsec;
 SensirionI2cScd4x scd4x;
 SoundLevelMeter dmm4026;
@@ -45,26 +43,6 @@ void setup() {
   pm.addSensor("SPS30", 7, false);
   pm.addSensor("BME688", 4, true); // Always on for AQI
   pm.addSensor("DMM4026", 6, false); 
-
-
-
-  // // ==== Načtení stavu BSEC ====
-  // prefs.begin("bsec", true);
-  // int stateLen = prefs.getBytesLength("iaqState");
-  // Serial.print("Stored state length in flash: ");
-  // Serial.println(stateLen);
-  // if (stateLen > 0 && stateLen <= BSEC_MAX_STATE_BLOB_SIZE) {
-  //   uint8_t state[BSEC_MAX_STATE_BLOB_SIZE];
-  //   prefs.getBytes("iaqState", state, stateLen);
-  //   if (bsec.setState(state)) {
-  //     Serial.println("BSEC state loaded from flash");
-  //   } else {
-  //     Serial.println("Failed to apply BSEC state");
-  //   }
-  // } else {
-  //   Serial.println("No BSEC state found in flash");
-  // }
-  // prefs.end();
 
   // ==== Inicializace BME688 ====
   if (!bsec.begin(BME68X_I2C_ADDR_LOW, Wire)) {
@@ -218,21 +196,6 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
         case BSEC_OUTPUT_IAQ:
           sensorData.iaq = o.signal;
           sensorData.iaqAccuracy = o.accuracy;
-  
-          // // Uložení stavu při dosažení plné kalibrace
-          // static bool stateSaved = false;
-          // if (!stateSaved && sensorData.iaqAccuracy == 3) {
-          //   uint8_t state[BSEC_MAX_STATE_BLOB_SIZE];
-          //   uint32_t stateLen = bsec.getState(state);
-          //   if (stateLen > 10 && stateLen <= BSEC_MAX_STATE_BLOB_SIZE) {
-          //       prefs.begin("bsec", false);
-          //       prefs.putBytes("iaqState", state, stateLen);
-          //       prefs.end();
-          //     }
-  
-          //   Serial.println("BSEC state saved to flash");
-          //   stateSaved = true;
-          // }
           break;
   
         case BSEC_OUTPUT_SENSOR_HEAT_COMPENSATED_TEMPERATURE:
