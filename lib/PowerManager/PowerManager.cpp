@@ -8,8 +8,9 @@ void PowerManager::addSensor(const String& name, uint8_t gpioPin, bool activeHig
     s.pin = gpioPin;
     s.activeHigh = activeHigh;
     s.state = false;
-    pinMode(gpioPin, OUTPUT_OPEN_DRAIN);
-    digitalWrite(gpioPin, activeHigh ? LOW : HIGH);
+
+    pinMode(gpioPin, OUTPUT);
+    digitalWrite(gpioPin, activeHigh ? HIGH : LOW); // výchozí stav = fyzicky vypnuto
 
     sensors[name] = s;
 }
@@ -18,7 +19,7 @@ void PowerManager::addSensor(const String& name, uint8_t gpioPin, bool activeHig
 void PowerManager::on(const String& name) {
     auto it = sensors.find(name);
     if (it != sensors.end()) {
-        digitalWrite(it->second.pin, it->second.activeHigh ? HIGH : LOW);
+        digitalWrite(it->second.pin, it->second.activeHigh ? LOW : HIGH);
         it->second.state = true;
     }
 }
@@ -26,14 +27,14 @@ void PowerManager::on(const String& name) {
 void PowerManager::off(const String& name) {
     auto it = sensors.find(name);
     if (it != sensors.end()) {
-        digitalWrite(it->second.pin, it->second.activeHigh ? LOW : HIGH);
+        digitalWrite(it->second.pin, it->second.activeHigh ? HIGH : LOW);
         it->second.state = false;
     }
 }
 
 void PowerManager::offAll() {
     for (auto& entry : sensors) {
-        digitalWrite(entry.second.pin, entry.second.activeHigh ? LOW : HIGH);
+        digitalWrite(entry.second.pin, entry.second.activeHigh ? HIGH : LOW);
         entry.second.state = false;
     }
 }

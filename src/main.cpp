@@ -38,11 +38,14 @@ void setup() {
   pm.disableWiFiAndBT();
   Wire.begin(SDA_PIN, SCL_PIN);
 
-  // Register sensors and their power control pins
-  pm.addSensor("SCD41", 5, true); // Always on for automatic self-calibration (ASC)
-  pm.addSensor("SPS30", 7, false);
-  pm.addSensor("BME688", 4, true); // Always on for AQI
-  pm.addSensor("DMM4026", 6, false); 
+  pm.addSensor("SCD41", 5, true);
+  pm.addSensor("SPS30", 7, true);
+  pm.addSensor("BME688", 4, true);
+  pm.addSensor("DMM4026", 6, true);
+
+  // Zapnout trvale napájené senzory
+  pm.on("SCD41");
+  pm.on("BME688");
 
   // ==== Inicializace BME688 ====
   if (!bsec.begin(BME68X_I2C_ADDR_LOW, Wire)) {
@@ -86,7 +89,7 @@ void setup() {
   // ==== Inicializace RADIO ====
   if (LORA_ENABLED) {
     Serial.println("Radio init");
-    int16_t state = radio.begin(868, 125.0, 12, 5, 0x34, 10, 8, 1.6, false);
+    int16_t state = radio.begin(868, 125.0, 7, 5, 0x34, 10, 8, 1.6, false);
     if (state != RADIOLIB_ERR_NONE) {
       Serial.println("Radio did not initialize.");
     }
@@ -311,6 +314,8 @@ void newDataCallback(const bme68xData data, const bsecOutputs outputs, Bsec2 bse
     addUint16((uint16_t)(sensorData.pm2_5_4_0 * 10));
     addUint16((uint16_t)(sensorData.pm4_0_10 * 10));
     addUint8((uint8_t)(sensorData.typical_size * 10));
+    addUint8(sensorData.battery_percent);
+
 
     // addUint8((int)(sensorData.scd41_temp + 40));
     // addUint8((int)sensorData.scd41_rh);

@@ -11,14 +11,9 @@ void SPS30Manager::begin(PowerManager* pm, uint8_t enPin) {
 }
 
 void SPS30Manager::startMeasurement() {
-  float vbat = heltec_vbat();
-  bool batteryPowered = !isExternalPower(vbat);
-
-  Serial.print("[SPS30Manager] Power source: ");
-  Serial.println(batteryPowered ? "Battery (step-up ON)" : "External (5V direct)");
 
   _pm->on("SPS30");
-  digitalWrite(_enPin, batteryPowered ? LOW : HIGH); // řízení EN pinu
+  digitalWrite(_enPin, HIGH); // vždy zapni měnič
   delay(500);
 
   if (sps30_probe() != 0) {
@@ -101,7 +96,7 @@ bool SPS30Manager::isExternalPower(float vbat) {
   static bool wasExternal = false;
   if (vbat > 4.15) {
     wasExternal = true;
-  } else if (vbat < 4.00) {
+  } else if (vbat < 4.10) {
     wasExternal = false;
   }
   return wasExternal;
