@@ -11,8 +11,12 @@ public:
   void finishMeasurement(SensorData& dest);
   unsigned long getStartTime() const;
   void forceReadMeasurement(SensorData& dest);
+  void startContinuous();
 
-private:
+  bool readLatest(SensorData &dest);
+  bool readIfReady(SensorData& dest);
+
+  private:
   PowerManager* _pm = nullptr;
   uint8_t _enPin = 19;
   unsigned long _startTime = 0;

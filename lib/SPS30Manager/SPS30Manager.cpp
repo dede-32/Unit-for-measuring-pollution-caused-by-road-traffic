@@ -124,3 +124,55 @@ void SPS30Manager::forceReadMeasurement(SensorData& dest) {
   digitalWrite(_enPin, LOW);
   _started = false;
 }
+
+bool SPS30Manager::readLatest(SensorData& dest) {
+  uint16_t ready = 0;
+  if (sps30_read_data_ready(&ready) != 0 || !ready) return false;
+
+  struct sps30_measurement m;
+  if (sps30_read_measurement(&m) != 0) return false;
+
+  dest.pm1_0 = m.mc_1p0;
+  dest.pm2_5 = m.mc_2p5;
+  dest.pm4_0 = m.mc_4p0;
+  dest.pm10  = m.mc_10p0;
+  dest.typical_size = m.typical_particle_size;
+
+  dest.pm1_0_2_5 = std::max(0.0f, dest.pm2_5 - dest.pm1_0);
+  dest.pm2_5_4_0 = std::max(0.0f, dest.pm4_0 - dest.pm2_5);
+  dest.pm4_0_10  = std::max(0.0f, dest.pm10  - dest.pm4_0);
+  return true;
+}
+
+void SPS30Manager::startContinuous() {
+  _pm->on("SPS30");
+  digitalWrite(_enPin, HIGH);
+  delay(500);
+
+  if (sps30_probe() != 0) { Serial.println("SPS30 not found"); return; }
+  if (sps30_start_measurement() != 0) { Serial.println("SPS30 start failed"); return; }
+
+  _started = true;
+}
+
+bool SPS30Manager::readIfReady(SensorData& dest) {
+  if (!_started) return false;
+
+  uint16_t ready = 0;
+  if (sps30_read_data_ready(&ready) != 0 || !ready) return false;
+
+  sps30_measurement m;
+  if (sps30_read_measurement(&m) != 0) return false;
+
+  dest.pm1_0 = m.mc_1p0;
+  dest.pm2_5 = m.mc_2p5;
+  dest.pm4_0 = m.mc_4p0;
+  dest.pm10  = m.mc_10p0;
+  dest.typical_size = m.typical_particle_size;
+
+  dest.pm1_0_2_5 = std::max(0.0f, dest.pm2_5 - dest.pm1_0);
+  dest.pm2_5_4_0 = std::max(0.0f, dest.pm4_0 - dest.pm2_5);
+  dest.pm4_0_10  = std::max(0.0f, dest.pm10  - dest.pm4_0);
+  
+  return true;
+}
