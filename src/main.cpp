@@ -8,6 +8,9 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <math.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include "secrets.h"
 
 #define SDA_PIN 18
 #define SCL_PIN 20
