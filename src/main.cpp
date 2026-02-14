@@ -229,15 +229,20 @@ void tickBsec(uint32_t now) {
 void tickSps30(uint32_t now) {
   if (now - tSps >= 1000) {
     tSps = now;
-    // Záleží na implementaci tvého SPS30Manageru:
-    // Pokud finishMeasurement jen čte poslední hodnoty, je to OK.
-    sps30.readIfReady(sensorData);
+    if (sps30.readIfReady(sensorData)) {
 
-    a_pm1.add(sensorData.pm1_0);
-    a_pm25.add(sensorData.pm2_5);      // pokud máš absolutní PM2.5
-    a_pm4.add(sensorData.pm4_0);       // pokud máš absolutní PM4.0
-    a_pm10.add(sensorData.pm10);       // pokud máš absolutní PM10
-    a_size.add(sensorData.typical_size);
+     /* if (sensorData.pm10 > 10.0f || sensorData.pm10 < 0.0f) {
+  Serial.printf("SPS30 OUTLIER raw: pm1=%.2f pm2.5=%.2f pm4=%.2f pm10=%.2f size=%.2f\n",
+                sensorData.pm1_0, sensorData.pm2_5, sensorData.pm4_0,
+                sensorData.pm10, sensorData.typical_size);
+}*/
+      // absolutní
+      a_pm1.add(sensorData.pm1_0);
+      a_pm25.add(sensorData.pm2_5);
+      a_pm4.add(sensorData.pm4_0);
+      a_pm10.add(sensorData.pm10);
+      a_size.add(sensorData.typical_size);
+    }
   }
 }
 
@@ -300,6 +305,12 @@ void publishEveryMinute(uint32_t now) {
     sensorData.pm10  = a_pm10.mean();
     sensorData.typical_size = a_size.mean();
 
+    // Frakce počítané z minutových průměrů (konzistentní)
+    sensorData.pm1_0_2_5 = std::max(0.0f, sensorData.pm2_5 - sensorData.pm1_0);
+    sensorData.pm2_5_4_0 = std::max(0.0f, sensorData.pm4_0 - sensorData.pm2_5);
+    sensorData.pm4_0_10  = std::max(0.0f, sensorData.pm10  - sensorData.pm4_0);
+
+
     Serial.println("--------------------------------------------------");
     Serial.printf("Battery: %.0f %%\n", sensorData.battery_percent);
     Serial.printf("IAQ: %.2f (acc: %d)\n", sensorData.iaq, sensorData.iaqAccuracy);
@@ -312,7 +323,7 @@ void publishEveryMinute(uint32_t now) {
 
     Serial.printf("Noise: %.2f dB(C)\n", sensorData.dBC);
 
-    Serial.printf("PM1.0: %.2f, PM2.5: %.2f, PM4.0: %.2f, PM10: %.2f, Size: %.2f\n",
+    Serial.printf("PM1-2.5: %.2f, PM2.5-4: %.2f, PM4-10: %.2f, PM10: %.2f, Size: %.2f\n",
               sensorData.pm1_0_2_5, sensorData.pm2_5_4_0, sensorData.pm4_0_10,
               sensorData.pm10, sensorData.typical_size);
 
@@ -322,7 +333,6 @@ void publishEveryMinute(uint32_t now) {
     a_scd_co2.reset();
 
     a_pm1.reset(); a_pm25.reset(); a_pm4.reset(); a_pm10.reset(); a_size.reset();
-
   }
 }
 
